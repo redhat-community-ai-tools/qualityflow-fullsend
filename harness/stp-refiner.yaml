@@ -1,0 +1,47 @@
+# harness/stp-refiner.yaml — Iteratively review and fix an STP until APPROVED.
+#
+# Needs Jira (curl) and GitHub (gh CLI) for re-verification against source data.
+agent: qualityflow/agents/stp-refiner.md
+description: "Review-refine loop that iterates until the STP reaches APPROVED verdict"
+role: coder
+slug: qualityflow-stp-refiner
+model: opus
+image: ghcr.io/fullsend-ai/fullsend-code:latest
+policy: policies/qf-full.yaml
+agent_input: qualityflow/config
+
+pre_script: scripts/pre-stp-refiner.sh
+
+host_files:
+  - src: env/gcp-vertex.env
+    dest: /sandbox/workspace/.env.d/gcp-vertex.env
+    expand: true
+  - src: ${GOOGLE_APPLICATION_CREDENTIALS}
+    dest: /tmp/.gcp-credentials.json
+  - src: ${GCP_OIDC_TOKEN_FILE}
+    dest: /sandbox/workspace/.gcp-oidc-token
+    optional: true
+  - src: env/qf-credentials.env
+    dest: /sandbox/workspace/.env.d/qf-credentials.env
+    expand: true
+
+skills:
+  - qualityflow/skills/project-resolver
+  - qualityflow/skills/review-rules-extractor
+  - qualityflow/skills/stp-reviewer
+  - qualityflow/skills/scenario-builder
+  - qualityflow/skills/output-validator
+  - qualityflow/skills/jira-parser
+  - qualityflow/skills/pr-analyzer
+
+validation_loop:
+  script: scripts/validate-review.sh
+  max_iterations: 3
+
+post_script: scripts/post-stp-refiner.sh
+
+runner_env:
+  JIRA_TICKET: "${JIRA_TICKET}"
+  FULLSEND_OUTPUT_SCHEMA: ${FULLSEND_DIR}/schemas/stp-refiner-result.schema.json
+
+timeout_minutes: 25

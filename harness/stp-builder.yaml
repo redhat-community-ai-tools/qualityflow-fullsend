@@ -1,0 +1,62 @@
+# harness/stp-builder.yaml — Generate a Software Test Plan from a Jira ticket.
+#
+# Needs Jira (curl) and GitHub (gh CLI) for ticket data and PR diffs.
+agent: qualityflow/agents/stp-builder.md
+description: "Generate an STP from Jira ticket data, PR diffs, and LSP analysis"
+role: coder
+slug: qualityflow-stp-builder
+model: opus
+image: ghcr.io/fullsend-ai/fullsend-code:latest
+policy: policies/qf-full.yaml
+agent_input: qualityflow/config
+
+pre_script: scripts/pre-stp-builder.sh
+
+host_files:
+  - src: env/gcp-vertex.env
+    dest: /sandbox/workspace/.env.d/gcp-vertex.env
+    expand: true
+  - src: ${GOOGLE_APPLICATION_CREDENTIALS}
+    dest: /tmp/.gcp-credentials.json
+  - src: ${GCP_OIDC_TOKEN_FILE}
+    dest: /sandbox/workspace/.gcp-oidc-token
+    optional: true
+  - src: env/qf-credentials.env
+    dest: /sandbox/workspace/.env.d/qf-credentials.env
+    expand: true
+  - src: env/mcp.json
+    dest: /sandbox/workspace/pr-repo/.mcp.json
+    expand: true
+    optional: true
+
+skills:
+  - qualityflow/skills/project-resolver
+  - qualityflow/skills/jira-parser
+  - qualityflow/skills/link-resolver
+  - qualityflow/skills/pr-analyzer
+  - qualityflow/skills/feature-finder
+  - qualityflow/skills/lsp-tracer
+  - qualityflow/skills/requirement-mapper
+  - qualityflow/skills/scenario-builder
+  - qualityflow/skills/tier-classifier
+  - qualityflow/skills/template-engine
+  - qualityflow/skills/table-generator
+  - qualityflow/skills/pii-sanitizer
+  - qualityflow/skills/output-validator
+  - qualityflow/skills/ticket-assessor
+  - qualityflow/skills/pipeline-state
+
+validation_loop:
+  script: scripts/validate-stp.sh
+  max_iterations: 2
+
+post_script: scripts/post-stp-builder.sh
+
+plugins:
+  - plugins/gopls-lsp
+
+runner_env:
+  JIRA_TICKET: "${JIRA_TICKET}"
+  FULLSEND_OUTPUT_SCHEMA: ${FULLSEND_DIR}/schemas/stp-builder-result.schema.json
+
+timeout_minutes: 15

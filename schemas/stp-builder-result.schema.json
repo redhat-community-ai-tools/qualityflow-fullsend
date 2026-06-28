@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stp-builder-result.schema.json",
+  "title": "STP Builder Result",
+  "description": "Structured output from the QualityFlow STP builder agent. Validated by the harness before the post-script runs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "jira_id"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "error"]
+    },
+    "jira_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]+-\\d+$"
+    },
+    "stp_file": {
+      "type": "string",
+      "description": "Path to generated STP markdown"
+    },
+    "ticket_assessment": {
+      "type": "string",
+      "description": "Path to ticket assessment report"
+    },
+    "scenarios": {
+      "type": "object",
+      "required": ["total"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "tier1": { "type": "integer", "minimum": 0 },
+        "tier2": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "requirements_traced": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of Jira requirements traced to test scenarios"
+    },
+    "lsp_calls": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of LSP analysis calls made during regression analysis"
+    },
+    "reason": {
+      "type": "string",
+      "enum": ["jira-unavailable", "config-error", "timeout", "no-testable-requirements"]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "success" } }, "required": ["status"] },
+      "then": { "required": ["stp_file", "scenarios"] }
+    },
+    {
+      "if": { "properties": { "status": { "const": "error" } }, "required": ["status"] },
+      "then": { "required": ["reason"] }
+    }
+  ]
+}

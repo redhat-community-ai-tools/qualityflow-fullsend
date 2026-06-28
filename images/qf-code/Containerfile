@@ -1,0 +1,20 @@
+# QualityFlow sandbox image — extends fullsend-code with additional tools.
+#
+# Base image already includes: Go, gopls (PR #815), gitleaks.
+# This image adds: pyright (Python LSP), mcp-atlassian (Jira data access).
+FROM ghcr.io/fullsend-ai/fullsend-code:latest
+
+USER root
+
+# pyright — Python language server for type-aware analysis
+RUN npm install -g pyright 2>/dev/null \
+    || echo "pyright install skipped (npm not available)"
+
+# mcp-atlassian — Jira MCP server for ticket data access via Claude MCP protocol.
+# Used by stp-builder and stp-reviewer agents to fetch issue data.
+# Alternative: direct Jira REST API via curl (see issue #1248 for ACLI discussion).
+RUN pip install --no-cache-dir --break-system-packages mcp-atlassian 2>/dev/null \
+    || pip install --no-cache-dir mcp-atlassian 2>/dev/null \
+    || echo "mcp-atlassian install skipped"
+
+USER sandbox

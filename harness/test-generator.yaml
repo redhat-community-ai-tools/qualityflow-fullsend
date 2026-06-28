@@ -1,0 +1,50 @@
+# harness/test-generator.yaml — Generate working tests from STD specifications.
+#
+# Language-agnostic: reads project config to determine which languages and
+# frameworks to generate tests for. Replaces go-test-generator + python-test-generator.
+agent: qualityflow/agents/test-generator.md
+description: "Generate working test implementations from STD specifications"
+role: coder
+slug: qualityflow-test-generator
+model: opus
+image: ghcr.io/fullsend-ai/fullsend-code:latest
+policy: policies/qf-codegen.yaml
+agent_input: qualityflow/config
+
+pre_script: scripts/pre-test-generator.sh
+
+host_files:
+  - src: env/gcp-vertex.env
+    dest: /sandbox/workspace/.env.d/gcp-vertex.env
+    expand: true
+  - src: ${GOOGLE_APPLICATION_CREDENTIALS}
+    dest: /tmp/.gcp-credentials.json
+  - src: ${GCP_OIDC_TOKEN_FILE}
+    dest: /sandbox/workspace/.gcp-oidc-token
+    optional: true
+  - src: env/qf-credentials.env
+    dest: /sandbox/workspace/.env.d/qf-credentials.env
+    expand: true
+skills:
+  - qualityflow/skills/project-resolver
+  - qualityflow/skills/test-generator
+  - qualityflow/skills/pipeline-state
+  - qualityflow/skills/lsp-tracer
+  - qualityflow/skills/feature-finder
+
+validation_loop:
+  script: scripts/validate-tests.sh
+  max_iterations: 2
+
+post_script: scripts/post-test-generator.sh
+
+plugins:
+  - plugins/gopls-lsp
+
+runner_env:
+  JIRA_TICKET: "${JIRA_TICKET}"
+  REPO_FULL_NAME: "${REPO_FULL_NAME}"
+  TARGET_BRANCH: "${TARGET_BRANCH}"
+  FULLSEND_OUTPUT_SCHEMA: ${FULLSEND_DIR}/schemas/test-result.schema.json
+
+timeout_minutes: 35

@@ -1,0 +1,21 @@
+# QualityFlow harness for FullSend integration.
+#
+# This file is the template for consuming teams. Copy it to your
+# .fullsend/customized/harness/qualityflow.yaml and update the base URL.
+#
+# To compute the integrity hash:
+#   ./scripts/compute-integrity.sh <commit-sha>
+#
+# To update the pin:
+#   1. Get the new commit SHA from the QualityFlow repo
+#   2. Run ./scripts/compute-integrity.sh <new-sha>
+#   3. Replace the base: line below
+
+base: https://raw.githubusercontent.com/guyoron1/qualityflow-fullsend/COMMIT_SHA_HERE/harness/qualityflow.yaml#sha256=INTEGRITY_HASH_HERE
+
+# Optional overrides (uncomment as needed):
+#
+# runner_env:
+#   CUSTOM_VAR: "value"
+#
+# timeout_minutes: 180

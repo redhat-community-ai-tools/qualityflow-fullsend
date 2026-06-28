@@ -1,0 +1,44 @@
+# harness/std-reviewer.yaml — Review STD YAML and test stubs for quality.
+#
+# File-only: reads STD and STP locally, no external API calls needed.
+agent: qualityflow/agents/std-reviewer.md
+description: "Review an STD against QE standards and STP traceability"
+role: review
+slug: qualityflow-std-reviewer
+model: opus
+image: ghcr.io/fullsend-ai/fullsend-code:latest
+policy: policies/qf-vertex.yaml
+agent_input: qualityflow/config
+
+pre_script: scripts/pre-std-reviewer.sh
+
+host_files:
+  - src: env/gcp-vertex.env
+    dest: /sandbox/workspace/.env.d/gcp-vertex.env
+    expand: true
+  - src: ${GOOGLE_APPLICATION_CREDENTIALS}
+    dest: /tmp/.gcp-credentials.json
+  - src: ${GCP_OIDC_TOKEN_FILE}
+    dest: /sandbox/workspace/.gcp-oidc-token
+    optional: true
+  - src: env/qf-credentials.env
+    dest: /sandbox/workspace/.env.d/qf-credentials.env
+    expand: true
+
+skills:
+  - qualityflow/skills/project-resolver
+  - qualityflow/skills/review-rules-extractor
+  - qualityflow/skills/std-reviewer
+  - qualityflow/skills/output-validator
+
+validation_loop:
+  script: scripts/validate-std-review.sh
+  max_iterations: 2
+
+post_script: scripts/post-std-reviewer.sh
+
+runner_env:
+  JIRA_TICKET: "${JIRA_TICKET}"
+  FULLSEND_OUTPUT_SCHEMA: ${FULLSEND_DIR}/schemas/std-review-result.schema.json
+
+timeout_minutes: 15

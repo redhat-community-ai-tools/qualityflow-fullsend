@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "STP Review Result",
+  "description": "Schema for QualityFlow STP review agent output. Validated by harness before postscript runs.",
+  "type": "object",
+  "required": ["status", "jira_id", "verdict", "confidence", "weighted_score", "findings", "report"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "error"]
+    },
+    "jira_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]+-\\d+$"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["APPROVED", "APPROVED_WITH_FINDINGS", "NEEDS_REVISION"]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["HIGH", "MEDIUM", "LOW"]
+    },
+    "weighted_score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "scope_downgrade": {
+      "type": "boolean",
+      "description": "True if verdict was downgraded due to out-of-scope components"
+    },
+    "findings": {
+      "type": "object",
+      "required": ["critical", "major", "minor", "actionable", "total"],
+      "properties": {
+        "critical": { "type": "integer", "minimum": 0 },
+        "major": { "type": "integer", "minimum": 0 },
+        "minor": { "type": "integer", "minimum": 0 },
+        "actionable": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["finding_id", "severity", "dimension", "description", "remediation", "actionable"],
+            "properties": {
+              "finding_id": { "type": "string" },
+              "severity": { "type": "string", "enum": ["CRITICAL", "MAJOR", "MINOR"] },
+              "dimension": { "type": "string" },
+              "rule": { "type": "string" },
+              "description": { "type": "string", "minLength": 10, "maxLength": 2000 },
+              "evidence": { "type": "string" },
+              "remediation": { "type": "string", "minLength": 10, "maxLength": 2000 },
+              "actionable": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "dimension_scores": {
+      "type": "object",
+      "properties": {
+        "rule_compliance": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "requirement_coverage": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "scenario_quality": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "risk_accuracy": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "scope_boundary": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "strategy": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "metadata": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "reviewed": {
+      "type": "string",
+      "description": "Path to the STP file that was reviewed"
+    },
+    "report": {
+      "type": "string",
+      "description": "Path to the review report markdown"
+    }
+  },
+  "if": {
+    "properties": { "status": { "const": "error" } }
+  },
+  "then": {
+    "required": ["status", "jira_id", "reason"],
+    "properties": {
+      "reason": {
+        "type": "string",
+        "enum": ["stp-not-found", "jira-unavailable", "config-error", "timeout"]
+      }
+    }
+  }
+}

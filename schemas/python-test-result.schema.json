@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "python-test-result.schema.json",
+  "title": "Python Test Generator Result",
+  "description": "Structured output from the QualityFlow Python test generator agent. Validated by the harness before the post-script runs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "jira_id"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "error"]
+    },
+    "jira_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]+-\\d+$"
+    },
+    "test_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Paths to generated Python test files (relative to repo root, with qf_ prefix)"
+    },
+    "target_directory": {
+      "type": ["string", "null"],
+      "description": "Source directory where test files were co-located, or null for fallback mode"
+    },
+    "output_mode": {
+      "type": "string",
+      "enum": ["co-located", "fallback"],
+      "description": "Whether tests were placed in the source tree or in outputs/"
+    },
+    "collection_verified": {
+      "type": "boolean",
+      "description": "Whether the generated tests passed pytest collection"
+    },
+    "syntax_check_passed": {
+      "type": "boolean",
+      "description": "Whether generated tests passed py_compile syntax check"
+    },
+    "conftest": {
+      "type": ["string", "null"],
+      "description": "Path to generated conftest.py, or null if existing conftest was reused"
+    },
+    "lsp_patterns": {
+      "type": "string",
+      "description": "Path to extracted LSP patterns YAML"
+    },
+    "test_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of test functions generated"
+    },
+    "reason": {
+      "type": "string",
+      "enum": ["std-not-found", "config-error", "timeout", "collection-failed", "syntax-failed", "no-python-scenarios"]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "success" } }, "required": ["status"] },
+      "then": { "required": ["test_files"] }
+    },
+    {
+      "if": { "properties": { "status": { "const": "error" } }, "required": ["status"] },
+      "then": { "required": ["reason"] }
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+version: 1
+
+# Network policy for the QualityFlow STP builder agent.
+# Allows access to:
+#   - Google Cloud APIs (Vertex AI for Claude inference)
+#   - Jira (issue data collection via REST API)
+#   - GitHub API (PR data collection via gh CLI)
+
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
+  read_write: [/sandbox, /tmp, /dev/null]
+landlock:
+  compatibility: best_effort
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  vertex_ai:
+    name: vertex-ai
+    endpoints:
+      - host: "api.anthropic.com"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+      - host: "*.googleapis.com"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: "**/claude"
+      - path: "**/node"
+
+  jira:
+    name: jira
+    endpoints:
+      - host: "*.atlassian.net"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: "**/curl"
+
+  npm_registry:
+    name: npm-registry
+    endpoints:
+      - host: "registry.npmjs.org"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: "**/npm"
+      - path: "**/node"
+
+  github:
+    name: github
+    endpoints:
+      - host: "api.github.com"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+      - host: "github.com"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: "**/gh"
+      - path: "**/curl"

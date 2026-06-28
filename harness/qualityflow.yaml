@@ -1,0 +1,71 @@
+# harness/qualityflow.yaml — Unified QualityFlow pipeline.
+#
+# Single-agent entry point for FullSend integration. Runs the full 7-stage
+# QE pipeline (STP → review → refine → STD → review → refine → tests)
+# in one session. The agent orchestrates stages internally.
+#
+# Consuming teams reference this via base: inheritance in their .fullsend repo:
+#   base: https://raw.githubusercontent.com/<org>/qualityflow-fullsend/<sha>/harness/qualityflow.yaml#sha256=<hash>
+agent: qualityflow/agents/qualityflow.md
+description: "QualityFlow: AI-powered QE pipeline — test planning, design review, and code generation from a Jira ticket or GitHub issue"
+role: coder
+slug: qualityflow
+model: opus
+image: ghcr.io/fullsend-ai/fullsend-code:latest
+policy: policies/qf-unified.yaml
+agent_input: qualityflow/config
+
+host_files:
+  - src: env/gcp-vertex.env
+    dest: /sandbox/workspace/.env.d/gcp-vertex.env
+    expand: true
+  - src: ${GOOGLE_APPLICATION_CREDENTIALS}
+    dest: /tmp/.gcp-credentials.json
+  - src: ${GCP_OIDC_TOKEN_FILE}
+    dest: /sandbox/workspace/.gcp-oidc-token
+    optional: true
+  - src: env/qf-credentials.env
+    dest: /sandbox/workspace/.env.d/qf-credentials.env
+    expand: true
+  - src: env/mcp.json
+    dest: /sandbox/workspace/pr-repo/.mcp.json
+    expand: true
+    optional: true
+
+skills:
+  - qualityflow/skills/project-resolver
+  - qualityflow/skills/jira-parser
+  - qualityflow/skills/link-resolver
+  - qualityflow/skills/pr-analyzer
+  - qualityflow/skills/feature-finder
+  - qualityflow/skills/lsp-tracer
+  - qualityflow/skills/requirement-mapper
+  - qualityflow/skills/scenario-builder
+  - qualityflow/skills/tier-classifier
+  - qualityflow/skills/template-engine
+  - qualityflow/skills/table-generator
+  - qualityflow/skills/pii-sanitizer
+  - qualityflow/skills/output-validator
+  - qualityflow/skills/ticket-assessor
+  - qualityflow/skills/pipeline-state
+  - qualityflow/skills/std-orchestrator
+  - qualityflow/skills/std-generator
+  - qualityflow/skills/go-stub-generator
+  - qualityflow/skills/python-stub-generator
+  - qualityflow/skills/review-rules-extractor
+  - qualityflow/skills/std-reviewer
+  - qualityflow/skills/stp-reviewer
+  - qualityflow/skills/test-generator
+  - qualityflow/skills/test-strategy-resolver
+
+plugins:
+  - plugins/gopls-lsp
+
+runner_env:
+  JIRA_TICKET: "${JIRA_TICKET}"
+  REPO_FULL_NAME: "${REPO_FULL_NAME}"
+  TARGET_BRANCH: "${TARGET_BRANCH}"
+  ISSUE_SOURCE: "${ISSUE_SOURCE}"
+  FULLSEND_OUTPUT_SCHEMA: ${FULLSEND_DIR}/schemas/stp-builder-result.schema.json
+
+timeout_minutes: 120
