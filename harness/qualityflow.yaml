@@ -5,7 +5,7 @@
 # in one session. The agent orchestrates stages internally.
 #
 # Consuming teams reference this via base: inheritance in their .fullsend repo:
-#   base: https://raw.githubusercontent.com/<org>/qualityflow-fullsend/<sha>/harness/qualityflow.yaml#sha256=<hash>
+#   base: https://raw.githubusercontent.com/redhat-community-ai-tools/qualityflow-fullsend/<sha>/harness/qualityflow.yaml#sha256=<hash>
 agent: qualityflow/agents/qualityflow.md
 description: "QualityFlow: AI-powered QE pipeline — test planning, design review, and code generation from a Jira ticket or GitHub issue"
 role: coder

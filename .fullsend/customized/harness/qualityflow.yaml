@@ -11,7 +11,7 @@
 #   2. Run ./scripts/compute-integrity.sh <new-sha>
 #   3. Replace the base: line below
 
-base: https://raw.githubusercontent.com/guyoron1/qualityflow-fullsend/COMMIT_SHA_HERE/harness/qualityflow.yaml#sha256=INTEGRITY_HASH_HERE
+base: https://raw.githubusercontent.com/redhat-community-ai-tools/qualityflow-fullsend/COMMIT_SHA_HERE/harness/qualityflow.yaml#sha256=INTEGRITY_HASH_HERE
 
 # Optional overrides (uncomment as needed):
 #

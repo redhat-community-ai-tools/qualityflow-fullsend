@@ -1,13 +1,13 @@
 # QualityFlow — FullSend Integration
 
-FullSend integration layer for [QualityFlow](https://github.com/guyoron1/qualityflow-opensource). Provides harness definitions, sandbox policies, CI workflows, and credential templates needed to run QualityFlow agents inside FullSend sandboxes.
+FullSend integration layer for [QualityFlow](https://github.com/redhat-community-ai-tools/qualityflow). Provides harness definitions, sandbox policies, CI workflows, and credential templates needed to run QualityFlow agents inside FullSend sandboxes.
 
 ## Quick start
 
 Add this to your `.fullsend/customized/harness/qualityflow.yaml`:
 
 ```yaml
-base: https://raw.githubusercontent.com/guyoron1/qualityflow-fullsend/<sha>/harness/qualityflow.yaml#sha256=<hash>
+base: https://raw.githubusercontent.com/redhat-community-ai-tools/qualityflow-fullsend/<sha>/harness/qualityflow.yaml#sha256=<hash>
 ```
 
 Compute the integrity hash:
@@ -61,7 +61,7 @@ Consuming teams then update their `base:` commit pin + integrity hash.
 This repo uses git submodules. Clone with:
 
 ```bash
-git clone --recurse-submodules https://github.com/guyoron1/qualityflow-fullsend.git
+git clone --recurse-submodules https://github.com/redhat-community-ai-tools/qualityflow-fullsend.git
 ```
 
 Or if already cloned:
