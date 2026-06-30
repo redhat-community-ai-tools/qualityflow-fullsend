@@ -6,6 +6,14 @@
 #
 # Consuming teams reference this via base: inheritance in their .fullsend repo:
 #   base: https://raw.githubusercontent.com/redhat-community-ai-tools/qualityflow-fullsend/<sha>/harness/qualityflow.yaml#sha256=<hash>
+
+# CEL trigger (ADR 0061): activate on /fs-plan-tests slash command on non-fork PRs.
+trigger: |
+  event.transition.kind == "comment_added"
+    && event.transition.comment.command == "/fs-plan-tests"
+    && has(event.state.change_proposal)
+    && !event.state.change_proposal.is_fork
+
 agent: qualityflow/agents/qualityflow.md
 description: "QualityFlow: AI-powered QE pipeline — test planning, design review, and code generation from a Jira ticket or GitHub issue"
 role: coder
