@@ -58,8 +58,7 @@ skills:
   - qualityflow/skills/pipeline-state
   - qualityflow/skills/std-orchestrator
   - qualityflow/skills/std-generator
-  - qualityflow/skills/go-stub-generator
-  - qualityflow/skills/python-stub-generator
+  - qualityflow/skills/stub-generator
   - qualityflow/skills/review-rules-extractor
   - qualityflow/skills/std-reviewer
   - qualityflow/skills/stp-reviewer

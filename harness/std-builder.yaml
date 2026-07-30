@@ -26,8 +26,7 @@ skills:
   - qualityflow/skills/project-resolver
   - qualityflow/skills/std-orchestrator
   - qualityflow/skills/std-generator
-  - qualityflow/skills/go-stub-generator
-  - qualityflow/skills/python-stub-generator
+  - qualityflow/skills/stub-generator
   - qualityflow/skills/pipeline-state
   - qualityflow/skills/output-validator
 

@@ -1,0 +1,10 @@
+# This directory is vendored from the qualityflow repo.
+# Do not edit files here directly. Run scripts/sync-qualityflow.sh to update.
+repo: https://github.com/redhat-community-ai-tools/qualityflow
+commit: e4675ce68adbd71077200b463ef18841dc0b46af
+synced_at: 2026-07-30T14:45:00Z
+directories:
+  - agents
+  - skills
+  - config
+  - commands
