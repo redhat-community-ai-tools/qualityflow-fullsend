@@ -72,7 +72,7 @@ runner_env:
   JIRA_TICKET: "${JIRA_TICKET}"
   REPO_FULL_NAME: "${REPO_FULL_NAME}"
   TARGET_BRANCH: "${TARGET_BRANCH}"
-  ISSUE_SOURCE: "${ISSUE_SOURCE}"
+  ISSUE_SOURCE: "github"
   FULLSEND_OUTPUT_SCHEMA: ${FULLSEND_DIR}/schemas/stp-builder-result.schema.json
 
 timeout_minutes: 120
