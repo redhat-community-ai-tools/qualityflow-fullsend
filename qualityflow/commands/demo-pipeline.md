@@ -42,10 +42,15 @@ After a phase completes, output:
 ──────────────────────────────────────────────────────────────
 ```
 
-Then use **AskUserQuestion** with the question:
-`"Phase {N} complete. Press Enter to start Phase {N+1} — {NEXT_PHASE_NAME}..."`
+Then **pause for the presenter** using AskUserQuestion:
+- Question: `"Ready to start Phase {N+1} — {NEXT_PHASE_NAME}?"`
+- Options: "Continue" (proceed to next phase), "Stop here" (exit pipeline)
+- For the final phase: `"Pipeline finished! Review the outputs?"`
+- Options: "Show summary" (print final summary), "Done" (exit)
 
-(For the final phase, use: `"Phase 4 complete. Pipeline finished!"`)
+This ensures the pipeline pauses at each phase for the presenter while remaining
+compatible with interactive use. If running non-interactively, users should run
+each phase command separately instead of using `/demo-pipeline`.
 
 ## Pipeline Phases
 
@@ -94,8 +99,7 @@ Use the Skill tool to invoke the generate-tests command:
 - args: "$ARGUMENTS"
 
 This generates test implementations based on project config:
-- Go/Ginkgo: `outputs/{JIRA_ID}/go-tests/*_test.go`
-- Python/pytest: `outputs/{JIRA_ID}/python-tests/test_*.py`
+- Tests are written to `outputs/{JIRA_ID}/{language}-tests/` (language from tier config)
 
 After completion, print the final done banner.
 

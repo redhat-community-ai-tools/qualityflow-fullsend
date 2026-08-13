@@ -7,7 +7,7 @@ and next-step suggestions.
 ## State File Location
 
 ```text
-outputs/state/{JIRA_ID}/pipeline_state.yaml
+outputs/{JIRA_ID}/state/pipeline_state.yaml
 ```
 
 ## State Schema
@@ -26,7 +26,7 @@ phases:
     status: completed            # pending | in_progress | completed | failed | skipped
     started: "2026-03-30T07:01:00Z"
     completed: "2026-03-30T07:05:00Z"
-    output: "outputs/stp/PROJ-12345/PROJ-12345_test_plan.md"
+    output: "outputs/PROJ-12345/stp/PROJ-12345_test_plan.md"
     output_checksum: "sha256:abc123..."
     skills_used:
       - requirement-mapper
@@ -39,7 +39,7 @@ phases:
     status: completed
     started: "2026-03-30T07:06:00Z"
     completed: "2026-03-30T07:08:00Z"
-    output: "outputs/reviews/PROJ-12345/PROJ-12345_stp_review.md"
+    output: "outputs/PROJ-12345/reviews/PROJ-12345_stp_review.md"
     verdict: APPROVED_WITH_FINDINGS
     findings:
       critical: 0
@@ -51,7 +51,7 @@ phases:
     status: completed
     started: "2026-03-30T07:09:00Z"
     completed: "2026-03-30T07:12:00Z"
-    output: "outputs/reviews/PROJ-12345/PROJ-12345_stp_refinement_log.md"
+    output: "outputs/PROJ-12345/reviews/PROJ-12345_stp_refinement_log.md"
     iterations: 2
     final_verdict: APPROVED_WITH_FINDINGS
     findings:
@@ -64,7 +64,7 @@ phases:
     status: completed
     started: "2026-03-30T07:13:00Z"
     completed: "2026-03-30T07:15:00Z"
-    output: "outputs/std/PROJ-12345/PROJ-12345_test_description.yaml"
+    output: "outputs/PROJ-12345/std/PROJ-12345_test_description.yaml"
     output_checksum: "sha256:def456..."
     stp_checksum_at_generation: "sha256:abc123..."
     scenario_counts:
@@ -72,8 +72,8 @@ phases:
       tier1: 15
       tier2: 12
     stubs:
-      go: "outputs/std/PROJ-12345/go-tests/"
-      python: "outputs/std/PROJ-12345/python-tests/"
+      go: "outputs/PROJ-12345/std/go-tests/"
+      python: "outputs/PROJ-12345/std/python-tests/"
     error: null
 
   std_review:
@@ -106,7 +106,7 @@ phases:
 
 **Action:**
 
-1. Create directory `outputs/state/{JIRA_ID}/`
+1. Create directory `outputs/{JIRA_ID}/state/`
 2. Write initial `pipeline_state.yaml` with all phases set to `pending`
 3. Set `ticket_id`, `project_id`, `display_name` from `project_context`
 4. Set `created` and `updated` to current ISO 8601 timestamp
@@ -119,7 +119,7 @@ phases:
 
 **Action:**
 
-1. Check if `outputs/state/{JIRA_ID}/pipeline_state.yaml` exists
+1. Check if `outputs/{JIRA_ID}/state/pipeline_state.yaml` exists
 2. If exists: read and parse YAML, return state object
 3. If not exists: initialize state (Operation 1), return new state
 
@@ -166,7 +166,7 @@ phases:
 
 1. Read current state
 2. Read approval gates from `project.yaml` (`approval_gates` list, default: `[stp_review, std_review]`)
-3. Read approval state from `outputs/state/{JIRA_ID}/approvals.yaml` (if exists)
+3. Read approval state from `outputs/{JIRA_ID}/state/approvals.yaml` (if exists)
 4. Check the prerequisite chain for the requested phase:
 
 | Phase | Prerequisites |
@@ -192,11 +192,11 @@ phases:
 |:-------------|:-----------|
 | `stp` | "Run `/stp-builder {JIRA_ID}` first." |
 | `stp_review` | "Run `/review-stp {JIRA_ID}` to review the STP." |
-| `stp_review` (awaiting approval) | "STP Review is awaiting human approval. Approve it in the QualityFlow dashboard before proceeding." |
+| `stp_review` (awaiting approval) | "STP Review is awaiting human approval. Approve it by running the review and refinement commands before proceeding." |
 | `stp_review` (rejected) | "STP Review was rejected. Address the reviewer feedback and re-run `/review-stp {JIRA_ID}`." |
 | `std` | "Run `/std-builder {JIRA_ID}` first." |
 | `std_review` | "Run `/review-std {JIRA_ID}` to review the STD." |
-| `std_review` (awaiting approval) | "STD Review is awaiting human approval. Approve it in the QualityFlow dashboard before proceeding." |
+| `std_review` (awaiting approval) | "STD Review is awaiting human approval. Approve it by running the review and refinement commands before proceeding." |
 | `std_review` (rejected) | "STD Review was rejected. Address the reviewer feedback and re-run `/review-std {JIRA_ID}`." |
 | `codegen` | "Run `/generate-tests {JIRA_ID}` first." |
 
@@ -215,7 +215,7 @@ phases:
 **Resolution logic:**
 
 1. For each prerequisite phase, check if it appears in `approval_gates`
-2. If it does, read `outputs/state/{JIRA_ID}/approvals.yaml`
+2. If it does, read `outputs/{JIRA_ID}/state/approvals.yaml`
 3. Check `approvals[phase].status`:
    - `approved` → gate passes, continue
    - `rejected` → gate blocks with rejection message
@@ -291,7 +291,7 @@ Pipeline Status: {JIRA_ID} ({display_name})
 
 Phase              Status              Verdict/Details
 ─────              ──────              ───────────────
-STP Generation     completed           outputs/stp/{ID}/{ID}_test_plan.md
+STP Generation     completed           outputs/{ID}/stp/{ID}_test_plan.md
 STP Review         completed           APPROVED_WITH_FINDINGS (0C, 3M, 5m)
 STP Refinement     completed           2 iterations → APPROVED_WITH_FINDINGS
 STD Generation     completed           27 scenarios (15 T1, 12 T2)

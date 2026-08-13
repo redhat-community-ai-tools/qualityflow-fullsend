@@ -42,6 +42,72 @@ Read the following config files from `project_context.config_dir`:
 
 These config files replace hardcoded repository paths and feature mappings used throughout this agent.
 
+### Step 0.1: Auto-Discover Local Repository Paths
+
+For each repository entry in `repositories.yaml` that has a `local_path_env` field
+(e.g., `primary_repo`, `tier2_repo`, `design_docs_repo`), resolve the local path:
+
+**Resolution order (first match wins):**
+
+1. **Environment variable** — read `${local_path_env}` (e.g., `$SOURCE_REPO_PATH`).
+   If set and the directory exists, use it. This is the explicit override and always
+   takes priority.
+
+2. **Common directory search** — if the env var is unset or empty, probe these
+   locations in order (using `{org}` and `{repo}` from the repository entry):
+   - `~/go/src/github.com/{org}/{repo}`
+   - `~/src/{repo}`
+   - `~/projects/{repo}`
+   - `~/{repo}`
+   - Sibling of the QualityFlow project: `../../{repo}` relative to
+     `project_context.config_dir`
+
+3. **Validation** — for each candidate directory that exists, run
+   `git remote -v` and confirm the output contains the expected remote URL
+   from the repository entry's `url` field. This prevents false matches
+   from unrelated repos with the same directory name.
+
+4. **Result:**
+   - **Found:** Use the validated path. Log:
+     `"Auto-discovered {repo} at {path} (set ${env_var} to skip discovery)"`
+   - **Not found:** Log a warning:
+     `"Local repo {repo} not found. Set ${env_var} or clone to a standard location. Continuing without LSP analysis for this repo."`
+     Continue with graceful degradation (existing behavior — the pipeline
+     proceeds without LSP data for this repo).
+
+**Important:** This step is purely additive. When `${local_path_env}` IS set,
+the behavior is identical to before this step existed.
+
+### Step 0.5: Classify Repository Branch State
+
+Before tracing, determine whether the local repository is on a **default/release branch**
+or a **work-in-progress (WIP) branch** (feature branch, draft PR branch, etc.).
+
+**Classification:**
+- **Default branch** (`main`, `master`, or the branch configured in `repositories.yaml`): code here
+  is merged and represents the project's current state.
+- **WIP branch** (any other branch, or uncommitted changes): code here is in-progress work that
+  has not been reviewed or merged.
+
+**Impact on analysis:**
+- Code found on a **default branch** may be treated as existing implementation. If test files
+  are found here, they represent existing test coverage.
+- Code found on a **WIP branch** is **context only** — it provides patterns, naming conventions,
+  and architectural hints, but it does NOT represent existing test coverage. Specifically:
+  - Do NOT suppress scenario generation because a WIP test file covers the same area
+  - Do NOT mark features as "already covered" based on WIP test files
+  - Do NOT add "Existing test" annotations to the output based on WIP code
+  - DO use WIP code for pattern extraction (naming conventions, helper usage, framework idioms)
+
+Add a `branch_state` field to the output indicating what was found:
+```yaml
+branch_state:
+  branch: "feature/my-feature-branch"
+  is_default: false
+  wip_test_files_found: 3
+  treatment: "context_only"
+```
+
 ### Step 1: Identify Entry Points
 
 **Entry Point Sources (try in order):**
@@ -251,7 +317,7 @@ Based on the call graph and code locations, map impacted code to features.
 
 Read `{project_context.config_dir}/components.yaml` `path_to_feature` mapping to determine which feature each code location belongs to.
 
-The `path_to_feature` mapping in `components.yaml` provides the package-location-to-feature-name associations (e.g., which package paths correspond to which features like VM Lifecycle, Live Migration, Networking, Storage, etc.).
+The `path_to_feature` mapping in `components.yaml` provides the package-location-to-feature-name associations (e.g., which package paths correspond to which features like User Auth, Data Export, Networking, Storage, etc.).
 
 ### Step 5: Build Regression Impact Summary
 
@@ -276,63 +342,63 @@ Return YAML:
 
 ```yaml
 entry_points_analyzed:
-  - symbol: HandleHotplug
-    file: pkg/controllers/vm/hotplug.go
+  - symbol: HandlePasswordReset
+    file: pkg/controllers/auth/reset.go
     line: 45
   - ...
 
 impacted_features:
-  - feature_name: Live Migration
+  - feature_name: Data Export
     relationship: Direct caller
-    code_location: pkg/handlers/migration/migration.go
-    why_might_break: Migration calls volume handling code that was modified
+    code_location: pkg/handlers/export/export.go
+    why_might_break: Export calls data handling code that was modified
     lsp_evidence:
-      - symbol: MigrateInstance
-        calls: HandleVolumeUpdate
-        file: pkg/handlers/migration/migration.go:234
-  - feature_name: Snapshots
+      - symbol: ExportData
+        calls: HandleDataUpdate
+        file: pkg/handlers/export/export.go:234
+  - feature_name: Backup
     relationship: Shared data structure
-    code_location: pkg/controllers/snapshot/snapshot.go
-    why_might_break: Snapshot relies on volume state that changed
+    code_location: pkg/controllers/backup/backup.go
+    why_might_break: Backup relies on data state that changed
     lsp_evidence:
-      - symbol: CreateSnapshot
-        uses_type: VolumeSpec
-        file: pkg/controllers/snapshot/snapshot.go:156
+      - symbol: CreateBackup
+        uses_type: DataSpec
+        file: pkg/controllers/backup/backup.go:156
   - ...
 
 call_graph_evidence:
-  - symbol: HandleVolumeUpdate
+  - symbol: HandleDataUpdate
     incoming_calls:
-      - caller: MigrateInstance
-        file: pkg/handlers/migration/migration.go
+      - caller: ExportData
+        file: pkg/handlers/export/export.go
         line: 234
       - caller: ReconcileResource
-        file: pkg/controllers/vm/vm.go
+        file: pkg/controllers/service/handler.go
         line: 567
     outgoing_calls:
-      - callee: ValidateVolume
+      - callee: ValidateData
         file: pkg/storage/validation.go
         line: 89
   - ...
 
 recommended_tests:
-  - requirement: Live migration works correctly with volume changes
-    test_scenario: Verify VM migration succeeds after volume modifications
+  - requirement: Data export works correctly with data changes
+    test_scenario: Verify export succeeds after data modifications
     test_type: Tier 1 (Functional)
     priority: P1
-    evidence: MigrateInstance calls modified HandleVolumeUpdate
-  - requirement: Snapshot/restore unaffected by volume changes
-    test_scenario: Verify snapshot captures modified volume state correctly
+    evidence: ExportData calls modified HandleDataUpdate
+  - requirement: Backup/restore unaffected by data changes
+    test_scenario: Verify backup captures modified data state correctly
     test_type: Tier 1 (Functional)
     priority: P1
-    evidence: CreateSnapshot uses modified VolumeSpec
+    evidence: CreateBackup uses modified DataSpec
   - ...
 
 validated_feature_candidates:
   - candidate: ResourceInstance
     source: jira_explicit_mention
     lsp_validated: true
-    symbol_location: pkg/controllers/vm/vm.go:45
+    symbol_location: pkg/controllers/service/handler.go:45
     in_call_graph: true
   - candidate: multiarch scheduling
     source: jira_acceptance_criteria
@@ -353,16 +419,16 @@ context_only_items:
   - ...
 
 existing_test_coverage:
-  - symbol: HandleVolumeUpdate
-    file: pkg/controllers/vm/volume.go
+  - symbol: HandleDataUpdate
+    file: pkg/controllers/data/update.go
     tests:
-      - test_function: TestHandleVolumeUpdate_Success
-        test_file: pkg/controllers/vm/volume_test.go
+      - test_function: TestHandleDataUpdate_Success
+        test_file: pkg/controllers/data/update_test.go
         line: 45
-        behavior_tested: "Volume update succeeds for valid spec"
+        behavior_tested: "Data update succeeds for valid spec"
     total_existing_tests: 1
-  - symbol: MigrateInstance
-    file: pkg/handlers/migration/migration.go
+  - symbol: ExportData
+    file: pkg/handlers/export/export.go
     tests: []
     total_existing_tests: 0
 
@@ -370,6 +436,12 @@ coverage_summary:
   symbols_with_tests: 1
   symbols_without_tests: 1
   total_existing_test_functions: 1
+
+branch_state:
+  branch: "main"
+  is_default: true
+  wip_test_files_found: 0
+  treatment: "existing_coverage"
 
 analysis_summary:
   total_symbols_analyzed: <count>
@@ -388,10 +460,42 @@ Read `repositories.yaml` from `project_context.config_dir` to get the repository
 
 When mapping PR file paths to local files:
 
-- PR path: `pkg/controllers/vm/vm.go` (example)
-- Local path: `{repo_local_path}/pkg/controllers/vm/vm.go`
+- PR path: `pkg/controllers/auth/handler.go` (example)
+- Local path: `{repo_local_path}/pkg/controllers/auth/handler.go`
 
 Where `{repo_local_path}` is resolved from the environment variable specified in `repositories.yaml`.
+
+## Output Boundary — What Flows Downstream vs What Stays Internal
+
+The regression-analyzer output contains two categories of data:
+
+### Downstream Data (consumed by stp-generator for the STP document)
+
+- `impacted_features[].feature_name`
+- `impacted_features[].relationship`
+- `impacted_features[].why_might_break`
+- `recommended_tests[].requirement` (user-facing language)
+- `recommended_tests[].test_scenario` (user-facing language)
+- `recommended_tests[].test_type`
+- `recommended_tests[].priority`
+- `validated_feature_candidates[].candidate`
+- `validated_feature_candidates[].source`
+- `validated_feature_candidates[].lsp_validated` (boolean)
+
+### Internal Metadata (used for traceability/debugging, NEVER appears in STP)
+
+- `lsp_evidence` (all fields — symbol names, file paths, line numbers)
+- `call_graph_evidence` (all fields)
+- `impacted_features[].code_location`
+- `validated_feature_candidates[].symbol_location`
+- `recommended_tests[].evidence` (source-level evidence string)
+- `entry_points_analyzed` (all fields)
+- `branch_state` (all fields)
+
+**Critical rule:** The stp-generator MUST NOT propagate internal metadata fields into
+the STP document. No source file paths, no symbol names, no line numbers, no "LSP Evidence"
+annotations, no "Existing Test" annotations, and no "Polarion: Yes/No" annotations may
+appear in any STP section. These are tooling artifacts, not test plan content.
 
 ## Depth Limits
 

@@ -71,7 +71,7 @@ examples) but is not required. The general rules provide comprehensive coverage 
 ## Input
 
 ```yaml
-stp_file_path: "outputs/stp/{JIRA_ID}/{JIRA_ID}_test_plan.md"
+stp_file_path: "outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md"
 jira_data:
   main_issue: <fetched Jira issue data>
   linked_issues: <linked issues array>
@@ -99,7 +99,7 @@ When `project_context.repo_rules` is available, the reviewer uses:
 
 A structured review report written to:
 ```
-outputs/reviews/{JIRA_ID}/{JIRA_ID}_stp_review.md
+outputs/{JIRA_ID}/reviews/{JIRA_ID}_stp_review.md
 ```
 
 ---
@@ -623,9 +623,10 @@ Compare the STP's Section III against the source Jira data to find coverage gaps
 
 **Red flags:**
 - **CRITICAL:** Acceptance criterion in Jira with no corresponding test scenario bullet
-- **CRITICAL:** Coverage rate below threshold — if `acceptance_criteria_covered / total < 0.70`
-  (less than 70% of acceptance criteria have corresponding scenarios), this is a systemic
-  coverage gap that blocks approval regardless of individual findings
+- **CRITICAL:** Coverage rate below threshold — if `acceptance_criteria_covered / total`
+  is below the project's coverage threshold (default: 0.70, configurable via
+  `review_rules.stp_rules.coverage_threshold`), this is a systemic coverage gap that
+  blocks approval regardless of individual findings
 - **CRITICAL:** Any P0 or GA-blocking acceptance criterion is uncovered — a single missing
   P0 criterion is sufficient for CRITICAL even if overall coverage rate is above 70%
 - **MAJOR:** Linked issue describes a use case not reflected in any scenario
@@ -643,10 +644,11 @@ edge_cases_identified: X (from Jira) / Y (in STP)
 ```
 
 **Coverage threshold evaluation:**
-After scoring all acceptance criteria, calculate the coverage rate. If below 70%, produce
-a CRITICAL finding: "Acceptance criteria coverage is {X}% ({covered}/{total}). Minimum
-threshold is 70%. {list uncovered criteria}." This ensures incomplete STPs do not proceed
-to STD generation.
+After scoring all acceptance criteria, calculate the coverage rate. Read the threshold
+from `review_rules.stp_rules.coverage_threshold` (default: 0.70 if not configured).
+If below threshold, produce a CRITICAL finding: "Acceptance criteria coverage is {X}%
+({covered}/{total}). Minimum threshold is {threshold}%. {list uncovered criteria}."
+This ensures incomplete STPs do not proceed to STD generation.
 
 #### Value Proposition & Use Case Quality
 

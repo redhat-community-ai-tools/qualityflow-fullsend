@@ -58,12 +58,12 @@ Optional flags:
 4. **Extract issue identifier** using a multi-source fallback chain:
 
    a. **Filename pattern:** Look for `{PREFIX}-{NUMBER}` in filenames
-      (e.g., `CNV-12345_test_plan.md` → `CNV-12345`)
-   b. **PR body:** Scan for Jira URLs (`/browse/{KEY}`), Jira IDs (`CNV-\d+`),
+      (e.g., `PROJ-12345_test_plan.md` → `PROJ-12345`)
+   b. **PR body:** Scan for Jira URLs (`/browse/{KEY}`), Jira IDs (`PROJ-\d+`),
       or GitHub issue URLs (`github.com/{owner}/{repo}/issues/{number}`)
    c. **PR title:** Same patterns as PR body
-   d. **PR labels:** Look for labels matching Jira prefixes (e.g., `CNV-12345`)
-   e. **Branch name:** Extract from branch (e.g., `feature/CNV-12345-fix`)
+   d. **PR labels:** Look for labels matching Jira prefixes (e.g., `PROJ-12345`)
+   e. **Branch name:** Extract from branch (e.g., `feature/PROJ-12345-fix`)
 
    If no Jira ID found from any source, check if a GitHub issue URL was found
    in the PR body and use that instead.
@@ -168,7 +168,24 @@ proposed fixes before classifying new comments.
 
    Extract the approved numbers as an integer set.
 
+   **Approval authority:** Only approvals from the PR author or users with
+   WRITE/ADMIN permission on the repo are honored. Approvals from other
+   commenters are logged but not applied — post a reply noting they lack
+   approval authority.
+
+   **Malformed input:** If a comment starts with "approve" but contains no
+   valid numbers, log a warning and post a reply: "Could not parse approval
+   numbers. Use format: `approve 1, 3`"
+
 5. **If approvals found — apply them:**
+
+   **Staleness check:** Before applying, verify that the target document file
+   has not been modified since the proposal was generated. Compare the file's
+   current content at the proposal's target section against what the proposal
+   expected. If the content has changed, skip the proposal and log:
+   "Proposal #{N} is stale — target section was modified since proposal was
+   generated. Please re-run `/fix-pr` to generate fresh proposals."
+
    For each approved proposal number:
    a. Look up the corresponding proposed change from the previous comment's table
    b. Read the target document file
@@ -291,9 +308,17 @@ appropriate edit based on the classification:
 
 - **`update-metadata`:** Correct version, date, or component fields.
 
+- **`update-title`:** Update the PR title via `gh pr edit --title`. Handled
+  in Step 5b.5 (not a document edit).
+
 **After each edit:**
 - Verify the edit was applied (Edit tool confirms success)
 - Log what was changed
+
+**If an edit fails** (target section not found, content mismatch):
+- Log the failure with the comment ID and target location
+- Add the comment to `proposed_fixes` instead of `applied_fixes`
+- Continue processing remaining comments — do not abort the entire run
 
 ### Step 4: Validate
 
@@ -397,6 +422,57 @@ git push origin HEAD
 - The local changes remain on the branch for manual resolution
 - Do NOT retry or force-push
 
+#### 5b.5. Update PR Title and Description
+
+After a successful push, update the PR title and description to match the
+target repo's conventions. Do NOT append QualityFlow status tables or diffs
+to the description — reviewers can see changes in commits.
+
+**Title:** If any review comment requested a title change, apply it:
+
+```bash
+gh pr edit {pr_number} --repo {owner}/{repo} --title "{new_title}"
+```
+
+**Description:** Populate the PR body using the target repo's PR template.
+
+1. Fetch the target repo's PR template:
+
+   ```bash
+   gh api repos/{owner}/{repo}/contents/.github/PULL_REQUEST_TEMPLATE.md \
+     --jq '.content' 2>/dev/null | base64 -d
+   ```
+
+   If no template exists, skip description updates.
+
+2. Read the current PR body:
+
+   ```bash
+   gh pr view {pr_number} --repo {owner}/{repo} --json body --jq .body
+   ```
+
+3. If the current body has unfilled template sections (HTML comments still
+   present, placeholder text), fill them in using context gathered during
+   the fix run:
+
+   - **STP Metadata / VEP issue:** Extract from the STP document's
+     Enhancement(s) field or from the Jira/GitHub issue linked in Step 0
+   - **What this PR does:** Summarize the STP/STD purpose using the
+     document's Feature Overview or Motivation section (1-3 sentences)
+   - **Special notes for your reviewer:** Include any notes relevant to
+     the review (e.g., which sections were auto-fixed, scope boundaries)
+
+   Preserve any content the PR author already filled in — only populate
+   empty or placeholder sections.
+
+4. Update the PR:
+
+   ```bash
+   gh pr edit {pr_number} --repo {owner}/{repo} --body "$updated_body"
+   ```
+
+**If `gh pr edit` fails:** Log a warning but do not fail the overall run.
+
 #### 5c. Final Report
 
 Display to the user:
@@ -436,8 +512,8 @@ All review comments have been addressed. The PR is ready for re-review.
 ## Example Usage
 
 ```text
-User: /fix-pr https://github.com/kubevirt/kubevirt/pull/12345
-User: /fix-pr kubevirt/kubevirt#12345
-User: /fix-pr https://github.com/kubevirt/kubevirt/pull/12345 --dry-run
-User: /fix-pr https://github.com/kubevirt/kubevirt/pull/12345 --review-id=987654
+User: /fix-pr https://github.com/my-org/my-repo/pull/12345
+User: /fix-pr my-org/my-repo#12345
+User: /fix-pr https://github.com/my-org/my-repo/pull/12345 --dry-run
+User: /fix-pr https://github.com/my-org/my-repo/pull/12345 --review-id=987654
 ```

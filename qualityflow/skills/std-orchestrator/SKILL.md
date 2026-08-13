@@ -26,9 +26,9 @@ Coordinates the Software Test Description (STD) generation workflow by:
 
 ## Input Required
 
-- `stp_file_path`: Path to the STP markdown file (e.g., `outputs/stp/PROJ-66855/PROJ-66855_test_plan.md`)
+- `stp_file_path`: Path to the STP markdown file (e.g., `outputs/PROJ-66855/stp/PROJ-66855_test_plan.md`)
 - `jira_id`: The Jira ticket ID (e.g., "PROJ-66855")
-- `output_dir`: Base directory for outputs (defaults to `outputs/std/{JIRA_ID}/`)
+- `output_dir`: Base directory for outputs (defaults to `outputs/{JIRA_ID}/std/`)
 - `phase`: `phase1` (default) or `phase2`
 
 ---
@@ -134,15 +134,55 @@ scenarios:
 - Values are in backtick-wrapped cells — strip the backticks but preserve the exact content
 - If the section is not present, set `source_constants` to an empty array
 
-2. **Call std-generator skill ONCE** with:
-   - ALL scenarios array (from Step 1)
-   - STP context
-   - `source_constants` array (from Step 1.5, may be empty)
-   - STP file path
+1.7. **Resolve Merged STP URL:**
+
+- Before generating the STD, check if the STP has been merged into a design-docs
+  repository. If a merged URL is available, set `stp_reference.url` so that
+  stub-generator can use it in module docstrings instead of the local file path.
+- **Resolution order:**
+  1. Read the STP file's Metadata section for a design-docs URL
+  2. If the STP metadata contains a PR URL, check if it has been merged (via
+     GitHub MCP `get_pull_request`). If merged, convert the PR URL to a blob URL
+     on the default branch.
+  3. If a `design_docs_repo` is configured in `repositories.yaml`, construct the
+     expected URL
+  4. If none found, set `stp_reference.url` to null — stub-generator will fall
+     back to the local file path.
+
+2. **Call std-generator skill** with scenarios, STP context,
+   `source_constants` array (from Step 1.5, may be empty), `stp_reference` (from Step 1.7), and STP file path.
+
+   **Small tickets (≤15 scenarios):** Generate all scenarios in a single
+   Write call (existing behavior).
+
+   **Large tickets (>15 scenarios) — chunked generation:**
+
+   Large STPs exceed the output token limit when generated in one pass.
+   Write the STD YAML incrementally:
+
+   a. **First chunk**: Call std-generator with scenarios 1–15. Write the
+      complete file (document_metadata + common_preconditions +
+      code_generation_config + scenarios 1–15) using the Write tool.
+      End the file with a YAML comment on its own line:
+      `# --- STD_CONTINUATION ---`
+
+   b. **Next chunks**: For each subsequent batch of up to 15 scenarios:
+      - Read the current file (input tokens — no limit)
+      - Call std-generator with ONLY the new batch of scenarios
+        (provide the shared metadata as read-only context, do NOT
+        regenerate it)
+      - Use the Edit tool to replace `# --- STD_CONTINUATION ---` with
+        the new scenarios followed by `# --- STD_CONTINUATION ---`
+
+   c. **Final chunk**: After the last batch, Edit to remove the
+      `# --- STD_CONTINUATION ---` line
+
+   Each chunk generates ≤15 scenarios (~2,500 lines), staying well under
+   the output token limit. The final file is identical to single-pass output.
 
 3. **Output file:**
-   - `outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml`
-   - Example: `outputs/std/PROJ-66855/PROJ-66855_test_description.yaml`
+   - `outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml`
+   - Example: `outputs/PROJ-66855/std/PROJ-66855_test_description.yaml`
    - Single comprehensive file with:
      - document_metadata (shared across all scenarios)
      - common_preconditions (shared infrastructure)
@@ -151,6 +191,7 @@ scenarios:
 4. **Validate STD output:**
    - File exists
    - Valid YAML syntax
+   - No leftover `# --- STD_CONTINUATION ---` markers
    - All required sections populated:
      - document_metadata
      - common_preconditions
@@ -191,7 +232,7 @@ scenarios:
 **Output files:**
 
 ```
-outputs/std/{JIRA_ID}/
+outputs/{JIRA_ID}/std/
 ├── go-tests/           (if language is Go, or Tier 1 in tier mode)
 │   └── *_stubs_test.go (Phase 1: stubs, Phase 2: implementation)
 └── python-tests/       (if language is Python, or Tier 2 in tier mode)
@@ -220,8 +261,8 @@ status: success
 component: std-orchestrator
 jira_id: PROJ-66855
 phase: phase1  # or phase2
-stp_file: outputs/stp/PROJ-66855/PROJ-66855_test_plan.md
-output_dir: outputs/std/PROJ-66855/
+stp_file: outputs/PROJ-66855/stp/PROJ-66855_test_plan.md
+output_dir: outputs/PROJ-66855/std/
 
 execution_summary:
   total_stp_scenarios: 12
@@ -266,7 +307,7 @@ notes:
 **Simple structure (STD YAML only):**
 
 ```
-outputs/std/PROJ-66855/
+outputs/PROJ-66855/std/
 ├── PROJ-66855_test_description.yaml     (NEW - comprehensive STD for ALL scenarios)
 └── std_generation_summary.yaml         (summary report)
 ```
@@ -275,7 +316,7 @@ outputs/std/PROJ-66855/
 
 - **ONE comprehensive STD file** for all scenarios (not one file per scenario)
 - **STD mirrors STP structure:** document_metadata + common_preconditions + scenarios array
-- **No separate std/ folder** - single file at outputs/std/{JIRA_ID}/ level
+- **No separate std/ folder** - single file at outputs/{JIRA_ID}/std/ level
 - **No test stubs** - STD YAML is input for code generators
 - **Downstream usage:** /generate-tests reads this STD file
 
@@ -359,7 +400,7 @@ Generate STD/PSE/Code for PROJ-66855
 **Orchestrator execution (Phase 1):**
 
 ```
-1. Read outputs/stp/PROJ-66855/PROJ-66855_test_plan.md
+1. Read outputs/PROJ-66855/stp/PROJ-66855_test_plan.md
 2. Parse Section III → 12 scenarios found (9 Tier 1, 3 Tier 2)
 3. Call std-generator ONCE → PROJ-66855_test_description.yaml
 4. Validate STD YAML
@@ -373,7 +414,7 @@ Generate STD/PSE/Code for PROJ-66855
 ```
 ✅ Phase 1 Test Stubs Generated!
 
-📄 Input: outputs/stp/PROJ-66855/PROJ-66855_test_plan.md
+📄 Input: outputs/PROJ-66855/stp/PROJ-66855_test_plan.md
 
 📊 Summary:
 - STP scenarios: 12 (9 Tier 1, 3 Tier 2)
@@ -381,9 +422,9 @@ Generate STD/PSE/Code for PROJ-66855
 - Phase: 1 (Design stubs with PSE docstrings)
 
 📁 Output:
-- outputs/std/PROJ-66855/PROJ-66855_test_description.yaml
-- outputs/std/PROJ-66855/go-tests/ (9 test stubs with PSE comments)
-- outputs/std/PROJ-66855/python-tests/ (3 test stubs with PSE docstrings)
+- outputs/PROJ-66855/std/PROJ-66855_test_description.yaml
+- outputs/PROJ-66855/std/go-tests/ (9 test stubs with PSE comments)
+- outputs/PROJ-66855/std/python-tests/ (3 test stubs with PSE docstrings)
 
 📋 Phase 1 Checklist:
 - [ ] STP link in module docstring

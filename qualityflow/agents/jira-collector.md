@@ -313,11 +313,11 @@ feature_candidates:
     - component: storage
       package_path: pkg/storage/
   acceptance_criteria:
-    - VM can attach volume while running
-    - Volume remains attached after migration
+    - Service can reload config without restart
+    - Config persists after failover
   integration_points:
-    - Live Migration (from linked issue PROJ-11111)
-    - Snapshot operations (mentioned in comments)
+    - Data replication (from linked issue PROJ-11111)
+    - Backup operations (mentioned in comments)
 
 dependency_graph:
   blocking: [<issues this blocks>]
@@ -336,3 +336,20 @@ Parse each URL to extract:
 - owner (e.g., `example-org` -- actual owners come from project config)
 - repo (e.g., `example-repo`, `example-subproject` -- actual repos come from project config)
 - pullNumber (e.g., `1234`)
+
+## Error Handling
+
+**MCP API failures:** If `mcp__mcp-atlassian__jira_get_issue` returns an error
+(connection timeout, authentication failure, 429 rate limit), log the error and
+exit with a clear message. Do not silently continue with partial data.
+
+**Comment limit warning:** If `comment_limit: 100` is reached and the issue may have
+more comments, log a warning: "Issue has 100+ comments — some PR URLs in older
+comments may be missed."
+
+**Linked issue fetch failures:** If a linked issue fails to fetch, log a warning
+with the issue key and continue processing remaining links. Include the failed
+issue key in the output under `failed_links`.
+
+**PR URL deduplication:** When PR URLs appear in both custom fields and comments,
+deduplicate by URL. The output `pr_urls` array must contain unique URLs only.

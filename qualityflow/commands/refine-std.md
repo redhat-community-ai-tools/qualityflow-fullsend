@@ -52,7 +52,7 @@ Extract the Jira ID from `project_context.jira_id` (e.g., PROJ-456).
 Check that the STD YAML file exists:
 
 ```text
-outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml
+outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml
 ```
 
 **If STD YAML does NOT exist:**
@@ -69,12 +69,12 @@ Also locate stub files:
 
 **Go stubs:**
 
-- Use Glob to find `outputs/std/{JIRA_ID}/go-tests/*_stubs_test.go`
+- Use Glob to find `outputs/{JIRA_ID}/std/go-tests/*_stubs_test.go`
 - Record paths of found files
 
 **Python stubs:**
 
-- Use Glob to find `outputs/std/{JIRA_ID}/python-tests/test_*_stubs.py`
+- Use Glob to find `outputs/{JIRA_ID}/std/python-tests/test_*_stubs.py`
 - Record paths of found files
 
 ### Step 2: Check for Existing Review
@@ -82,7 +82,7 @@ Also locate stub files:
 Check if a review report already exists:
 
 ```text
-outputs/reviews/{JIRA_ID}/{JIRA_ID}_std_review.md
+outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_review.md
 ```
 
 **If review exists:**
@@ -154,23 +154,21 @@ Pick the highest-priority unfixed dimension from the fix queue:
 - Within same severity, process in dimension order (Dim 1 before Dim 2)
 - Skip dimensions marked as PASS in the review
 
-#### 4.1.5: Git Checkpoint (commit before edit)
+#### 4.1.5: Content Snapshot (before edit)
 
-Before modifying STD artifacts, create a git checkpoint so edits can be rolled back
+Before modifying STD artifacts, create content snapshots so edits can be rolled back
 if they cause a regression:
 
-```bash
-git add outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml \
-      outputs/std/{JIRA_ID}/go-tests/*_stubs_test.go \
-      outputs/std/{JIRA_ID}/python-tests/test_*_stubs.py
-git commit -m "refine-std: pre-iteration-{iteration} checkpoint for {JIRA_ID}"
-```
+1. **Read** the full content of `outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml`
+2. **Read** any Go stub files in `outputs/{JIRA_ID}/std/go-tests/`
+3. **Read** any Python stub files in `outputs/{JIRA_ID}/std/python-tests/`
+4. Store all content as `std_snapshots` (keyed by file path, in working memory)
 
-This commit is the rollback target. If the iteration causes a regression (Step 4.4.5),
-all files are restored via `git checkout HEAD -- <files>`.
+These snapshots are the rollback targets. If the iteration causes a regression
+(Step 4.4.5), the files are restored by writing the snapshots back using the Write tool.
 
-**If git commit fails** (e.g., no changes, not a git repo): log a warning and continue
-without rollback capability. The refinement loop still works — it just cannot auto-revert.
+**Note:** This command's tool set does not include Bash — all checkpoint and rollback
+operations use Read/Write tools only.
 
 #### 4.2: Apply Targeted Edits
 
@@ -181,7 +179,7 @@ selected dimension only.
 
 **Dimension 1 — STP-STD Traceability:**
 
-- Read the source STP from `outputs/stp/{JIRA_ID}/{JIRA_ID}_test_plan.md`
+- Read the source STP from `outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md`
 - For missing forward coverage (STP scenario not in STD): add the missing scenario to the STD YAML with appropriate test structure, pattern metadata, and variables
 - For orphan STD scenarios (in STD but not in STP): verify if they are valid additions; if the review says to remove them, remove them; otherwise add a comment noting they extend STP coverage
 - Ensure `stp_requirement_id` fields in STD YAML match STP requirement IDs
@@ -264,7 +262,7 @@ Run the full review again by executing the review-std workflow:
 2. Read source STP (for traceability)
 3. Resolve review rules
 4. Invoke std-reviewer skill
-5. Save updated review report to `outputs/reviews/{JIRA_ID}/{JIRA_ID}_std_review.md`
+5. Save updated review report to `outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_review.md`
 
 Parse the new review report. Extract updated finding counts.
 
@@ -278,14 +276,11 @@ For each **protected dimension** (was PASS in baseline):
 **On regression:**
 
 1. Log: "Regression detected — fixing {targeted dimension} broke {regressed dimension}."
-2. Roll back all STD artifacts to the pre-iteration checkpoint:
-
-   ```bash
-   git checkout HEAD -- outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml \
-                        outputs/std/{JIRA_ID}/go-tests/ \
-                        outputs/std/{JIRA_ID}/python-tests/
-   ```
-
+2. Roll back all STD artifacts to the pre-iteration snapshots:
+   - For each file in `std_snapshots`, verify the target file still exists
+   - If file exists: write the snapshot content back to restore it
+   - If any file was moved/deleted: Log error "Cannot rollback — target file
+     {path} missing" and exit the refinement loop
 3. Mark the targeted dimension as **skip-regressive** in the fix queue (do not
    attempt it again — it needs a different fix strategy or manual attention).
 4. Do NOT count this as a no-improvement iteration (the regression was caught
@@ -344,7 +339,7 @@ If none met, increment `iteration` and return to Step 4.1.
 Generate and save the refinement log:
 
 ```text
-outputs/reviews/{JIRA_ID}/{JIRA_ID}_std_refinement_log.md
+outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_refinement_log.md
 ```
 
 Use the following format:
@@ -352,7 +347,7 @@ Use the following format:
 ```markdown
 # Refinement Log: {JIRA_ID}
 
-**Artifact:** outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml
+**Artifact:** outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml
 **Stub Files:** {list of stub file paths, or "None"}
 **Date:** {YYYY-MM-DD}
 **Iterations:** {count}
@@ -405,12 +400,12 @@ Finding Progression:
   End:    {X} critical, {Y} major, {Z} minor
 
 Artifacts:
-  STD YAML:      outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml
+  STD YAML:      outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml
   Go Stubs:      {count} files (or "N/A")
   Python Stubs:  {count} files (or "N/A")
 
-Review:    outputs/reviews/{JIRA_ID}/{JIRA_ID}_std_review.md
-Log:       outputs/reviews/{JIRA_ID}/{JIRA_ID}_std_refinement_log.md
+Review:    outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_review.md
+Log:       outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_refinement_log.md
 
 {If final verdict is APPROVED:}
 STD is fully approved. Ready for test generation.
@@ -443,7 +438,7 @@ See refinement log for details.
 
 **If STD YAML not found:**
 
-- Error message: "STD file not found at outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml"
+- Error message: "STD file not found at outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml"
 - Suggestion: "Please run `/std-builder {JIRA_ID}` first to create the STD"
 - Exit without proceeding
 
@@ -482,16 +477,16 @@ See refinement log for details.
 ```text
 User: /refine-std PROJ-456
 Output:
-  - Updated STD YAML: outputs/std/PROJ-456/PROJ-456_test_description.yaml
-  - Updated stubs: outputs/std/PROJ-456/go-tests/, outputs/std/PROJ-456/python-tests/
-  - Updated review: outputs/reviews/PROJ-456/PROJ-456_std_review.md
-  - Refinement log: outputs/reviews/PROJ-456/PROJ-456_std_refinement_log.md
+  - Updated STD YAML: outputs/PROJ-456/std/PROJ-456_test_description.yaml
+  - Updated stubs: outputs/PROJ-456/std/go-tests/, outputs/PROJ-456/std/python-tests/
+  - Updated review: outputs/PROJ-456/reviews/PROJ-456_std_review.md
+  - Refinement log: outputs/PROJ-456/reviews/PROJ-456_std_refinement_log.md
 
 User: /refine-std PROJ-789
 Output:
-  - Updated STD YAML: outputs/std/PROJ-789/PROJ-789_test_description.yaml
-  - Updated review: outputs/reviews/PROJ-789/PROJ-789_std_review.md
-  - Refinement log: outputs/reviews/PROJ-789/PROJ-789_std_refinement_log.md
+  - Updated STD YAML: outputs/PROJ-789/std/PROJ-789_test_description.yaml
+  - Updated review: outputs/PROJ-789/reviews/PROJ-789_std_review.md
+  - Refinement log: outputs/PROJ-789/reviews/PROJ-789_std_refinement_log.md
 ```
 
 ---
@@ -505,7 +500,7 @@ User: /refine-std {JIRA_ID}
 0. Resolve project: project-resolver -> project_context
   |
   v
-1. Verify STD exists: outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml
+1. Verify STD exists: outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml
   |
   v
 2. Run or read existing review -> parse findings
@@ -517,12 +512,12 @@ User: /refine-std {JIRA_ID}
 4. Iterative fix loop (max 5 iterations):
    |
    +-> 4.1   Select next dimension
-   +-> 4.1.5 Git checkpoint (commit before edit)
+   +-> 4.1.5 Content snapshot (Read files before edit)
    +-> 4.2   Apply targeted edits to STD YAML / stubs
    +-> 4.3   Validate structure (YAML parse, stub syntax)
    +-> 4.4   Re-run review (std-reviewer)
    +-> 4.4.5 Regression detection (cross-dimension check)
-   |          +-> Regression? -> git rollback, skip dimension
+   |          +-> Regression? -> Write snapshots back, skip dimension
    +-> 4.5   Measure improvement (delta)
    +-> 4.6   Check stopping criteria
    |          +-> APPROVED or APPROVED_WITH_FINDINGS -> stop
@@ -533,7 +528,7 @@ User: /refine-std {JIRA_ID}
    |
    v
 5. Save refinement log:
-   -> outputs/reviews/{JIRA_ID}/{JIRA_ID}_std_refinement_log.md
+   -> outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_refinement_log.md
   |
   v
 6. Report results to user

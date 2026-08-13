@@ -23,6 +23,8 @@ human review.
 ## Input Required
 
 - `jira_id`: Jira ticket ID (e.g., "MYPROJ-12345", "GH-2247")
+- `priority_filter`: (Optional) Priority level to generate stubs for
+  ("P0", "P1", or "P2")
 
 **Prerequisites:**
 
@@ -36,10 +38,9 @@ human review.
 ```
 outputs/{JIRA_ID}/std/
 ├── {JIRA_ID}_test_description.yaml        (STD YAML — already exists)
-├── go-tests/                              (if Go config enabled)
-│   └── {feature}_stubs_test.go
-└── python-tests/                          (if Python config enabled)
-    └── test_{feature}_stubs.py
+├── {language}-tests/                      (one directory per tier language)
+│   └── {feature}_stubs_test.{ext}
+└── ...
 ```
 
 For other languages: `outputs/{JIRA_ID}/std/{language}-tests/`
@@ -51,7 +52,7 @@ For other languages: `outputs/{JIRA_ID}/std/{language}-tests/`
 **Generate ONE test stub per STD scenario. No exceptions.**
 
 - CORRECT: 12 STD scenarios, 1 Go config enabled → 12 stub functions
-- CORRECT: 12 STD scenarios (9 Tier 1, 3 Tier 2), Go + Python configs → 9 Go + 3 Python stubs
+- CORRECT: 12 STD scenarios (9 in tier A, 3 in tier B), two tier configs → 9 stubs in language A + 3 in language B
 - WRONG: 12 STD scenarios → 5 test files with some scenarios omitted
 
 **Pattern-based file grouping is allowed**, but **EVERY scenario must get
@@ -73,45 +74,71 @@ Load `outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml`
 
 ### Step 2: Discover Language Targets
 
-Scan `{project_context.config_dir}/` for YAML files with
+**Auto-discovery guard:** If `project_context.config_dir` is null (auto-discovered
+project), read the `code_generation_config` section from the STD YAML instead of
+scanning config files. The STD YAML already contains language, framework, and import
+information populated by the test-strategy-resolver during STD generation. Skip the
+config file scan entirely and build the language target map from STD metadata.
+
+**When config_dir is available:** Scan `{project_context.config_dir}/` for YAML files with
 `enabled: true` and a `language:` field:
 
 ```bash
-for f in {project_context.config_dir}/*.yaml; do
-  # Skip non-language files (project.yaml, repositories.yaml, etc.)
-  # A language config has: enabled, language, framework fields
+for f in {project_context.config_dir}/tier*.yaml; do
+  # Each tier config has: enabled, tier, language, framework fields
+  # Teams create one file per tier: tier1.yaml, tier2.yaml, tier3.yaml, etc.
 done
 ```
 
-Known file names: `tier1.yaml`, `tier2.yaml`
+Each tier config provides:
 
-Each language config provides:
-
+- `tier` — tier label for routing (e.g., "Tier 1", "Tier 2", "Tier 3")
 - `language` — "go", "python", etc.
 - `framework` — "testing", "ginkgo-v2", "pytest", etc.
-- `tier` (OPTIONAL) — "Tier 1", "Tier 2", etc.
+- `reference_guide` (optional) — URL to team's testing guide for this tier
+- `reference_tests` (optional) — URLs to example test files
 - `imports` — organized by category
 - `default_package` — package name for Go files
 
-### Step 2.5: Filter Existing Coverage
+### Step 2.5: Filter by Coverage Status and Priority
 
-Before mapping scenarios to language targets, remove scenarios with
-`coverage_status: EXISTING_COVERAGE` from the working set. These represent
-behaviors already covered by existing tests and do not need stubs generated.
+**Coverage filtering (existing behavior):**
+
+Remove scenarios with `coverage_status: EXISTING_COVERAGE` from the working
+set. These represent behaviors already covered by existing tests and do not
+need stubs generated.
 
 Log the count: `"Skipping {N} scenarios with existing coverage"`
 
-Scenarios with `coverage_status: NEW` or `PARTIAL_COVERAGE` (or no
-`coverage_status` field) proceed to Step 3.
+**Priority filtering (new):**
+
+If `priority_filter` is provided:
+
+1. Remove scenarios where `priority != priority_filter` from working set
+2. Scenarios missing the `priority` field are included (backwards compatible)
+3. Log the filtering result:
+
+   ```text
+   Generating stubs for priority {priority_filter}: {N} scenarios
+   Skipping {M} scenarios with different priorities
+   ```
+
+If `priority_filter` is null, all scenarios proceed (default behavior).
+
+**Final working set:** Scenarios with (`coverage_status` != EXISTING_COVERAGE)
+AND (`priority` == priority_filter OR priority_filter is null OR priority
+field missing)
+
+Scenarios from the final working set proceed to Step 3.
 
 ### Step 3: Map Scenarios to Language Targets
 
 **For each enabled language config:**
 
-1. **If the config declares `tier: "Tier 1"` (or any tier value):**
+1. **If the config declares a `tier:` field:**
    Filter STD scenarios to ONLY those matching that tier.
-   This is the tier-scoped mode — used by projects where
-   Tier 1 = Go/Ginkgo and Tier 2 = Python/pytest.
+   Matching is prefix-based: scenario tier "Tier 2 (End-to-End)" matches
+   config tier "Tier 2".
 
 2. **If the config has NO `tier:` field:**
    Generate stubs for ALL STD scenarios in this language.
@@ -152,6 +179,14 @@ After all files generated:
 3. Verify: `N_stubs == N_assigned` for each language
 4. Verify: every STD scenario appears in at least one language's stubs
 5. If any scenario is missing: ERROR + list missing scenario IDs
+
+**Priority filter applied:** If `priority_filter` was provided, validation
+counts should match filtered scenarios only, not total STD scenarios. Report:
+
+- Total STD scenarios: {total}
+- Filtered to priority {priority_filter}: {filtered_count}
+- Generated stubs: {generated_count}
+- Coverage: {generated_count}/{filtered_count} scenarios
 
 ### Step 6: Report Results
 
@@ -394,43 +429,12 @@ test_specific_behavior.__test__ = False
 
 **Output:** `outputs/{JIRA_ID}/std/python-tests/test_{feature}_stubs.py`
 
-### Specialized (Tier 3) Tests
+### Additional Tiers
 
-Specialized tests use the same Python/pytest framework as End-to-End tests.
-The stub-generator treats Specialized scenarios identically to End-to-End
-scenarios for stub generation. The distinction is documented via markers:
-
-```python
-class TestSpecializedFeature:
-    """
-    Tests for {feature description} (Specialized).
-
-    Markers:
-        - specialized
-        - {hardware_marker}
-
-    Preconditions:
-        - {Hardware-specific precondition}
-    """
-    __test__ = False
-
-    def test_specific_behavior(self):
-        """
-        Test that {specific ONE thing being verified}.
-
-        Preconditions:
-            - {Specialized infrastructure precondition}
-
-        Steps:
-            1. {Discrete action}
-
-        Expected:
-            - {Concrete, verifiable assertion}
-        """
-```
-
-The `specialized` marker and any hardware-specific markers (`gpu`, `sriov`,
-`numa`, `ceph`, etc.) are documented in the docstring `Markers:` section.
+Each tier routes to whatever language and framework its `tier*.yaml` config
+defines. There is no hardcoded mapping between tier numbers and languages.
+The stub-generator matches each scenario's tier to its config and generates
+stubs in that config's language.
 
 ### Repo Rules Integration (Python)
 

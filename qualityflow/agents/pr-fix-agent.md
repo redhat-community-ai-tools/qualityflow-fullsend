@@ -67,7 +67,7 @@ dry_run: false   # if true, classify and report but don't edit or push
    Store matched file paths for later staging.
 
 3. **Extract issue identifier** using a multi-source fallback chain:
-   a. Filename: `{PREFIX}-{NUMBER}` (e.g., `CNV-12345_test_plan.md`)
+   a. Filename: `{PREFIX}-{NUMBER}` (e.g., `PROJ-12345_test_plan.md`)
    b. PR body: scan for Jira URLs, Jira IDs, or GitHub issue URLs
    c. PR title: same patterns
    d. PR labels: Jira-ID-shaped labels
@@ -288,6 +288,50 @@ Co-Authored-By: QualityFlow <noreply@qualityflow>"
 
 git push origin HEAD
 ```
+
+#### 5b.5. Update PR Title and Description
+
+After a successful push, update the PR title and description to match the
+target repo's conventions. Do NOT append QualityFlow status tables or diffs
+to the description — reviewers can see changes in commits.
+
+**Title:** If any review comment requested a title change, apply it:
+
+```bash
+gh pr edit {pr_number} --repo {owner}/{repo} --title "{new_title}"
+```
+
+**Description:** Populate the PR body using the target repo's PR template.
+
+1. Fetch the target repo's PR template:
+
+   ```bash
+   gh api repos/{owner}/{repo}/contents/.github/PULL_REQUEST_TEMPLATE.md \
+     --jq '.content' 2>/dev/null | base64 -d
+   ```
+
+   If no template exists, skip description updates.
+
+2. Read the current PR body. If it has unfilled template sections (HTML
+   comments still present, placeholder text), fill them in using context
+   from the fix run:
+
+   - **STP Metadata / VEP issue:** From the STP's Enhancement(s) field
+     or the linked Jira/GitHub issue
+   - **What this PR does:** Summarize using the document's Feature Overview
+     (1-3 sentences)
+   - **Special notes for your reviewer:** Relevant review context (which
+     sections were auto-fixed, scope boundaries)
+
+   Preserve any content the PR author already filled in.
+
+3. Update the PR:
+
+   ```bash
+   gh pr edit {pr_number} --repo {owner}/{repo} --body "$updated_body"
+   ```
+
+**If `gh pr edit` fails:** Log a warning but do not fail the overall run.
 
 #### 5c. Handle Push Failure
 

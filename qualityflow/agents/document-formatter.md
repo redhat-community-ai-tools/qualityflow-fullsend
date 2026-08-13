@@ -40,12 +40,17 @@ Input from stp-generator:
 ```yaml
 generated_document: <full STP markdown>
 jira_id: {JIRA_ID}
-output_path: outputs/stp/{JIRA_ID}/{JIRA_ID}_test_plan.md
+output_path: outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md
 ```
 
 ### Step 2: Load PII Exceptions and Invoke pii-sanitizer Skill
 
 **Toggle gate:** If `project_context.feature_toggles.pii_sanitization` is false, skip the pii-sanitizer invocation. Proceed directly to Step 3 (validation).
+
+**Warning:** When PII sanitization is skipped, log a prominent warning:
+"PII sanitization is DISABLED for this project. Generated documents may contain
+real customer names, IP addresses, or hostnames. Verify this is intentional
+before sharing documents externally."
 
 Read `{project_context.config_dir}/pii_exceptions.yaml` for project-specific PII exception rules (e.g., terms that should not be sanitized, project-specific domain names to preserve).
 
@@ -145,7 +150,7 @@ sanitization_summary:
   vendor_names_replaced: <count>
   credentials_found: 0  # Should always be 0
 
-file_path: outputs/stp/{JIRA_ID}/{JIRA_ID}_test_plan.md
+file_path: outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md
 file_written: true
 ```
 

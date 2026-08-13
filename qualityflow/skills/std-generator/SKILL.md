@@ -93,7 +93,7 @@ within each scenario in the STD YAML.
         line: 14
     ```
 
-- `stp_file_path`: Path to source STP file (e.g., `outputs/stp/PROJ-66855/PROJ-66855_test_plan.md`)
+- `stp_file_path`: Path to source STP file (e.g., `outputs/PROJ-66855/stp/PROJ-66855_test_plan.md`)
 
 ## Output
 
@@ -101,7 +101,7 @@ within each scenario in the STD YAML.
 
 - Filename: `{JIRA_ID}_test_description.yaml`
 - Example: `PROJ-66855_test_description.yaml`
-- Location: `outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml`
+- Location: `outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml`
 - Size: Variable (~100-200 lines per scenario + 100 lines shared metadata)
 - Format: Valid YAML with document metadata + scenarios array
 
@@ -149,7 +149,7 @@ document_metadata:
   jira_summary: "{Jira issue summary}"
   source_bugs: ["{PROJ-XXXXX}", ...]  # If applicable
   stp_reference:
-    file: "outputs/stp/{JIRA_ID}/{JIRA_ID}_test_plan.md"
+    file: "outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md"
     version: "v1"
     sections_covered: "Section III - Requirements-to-Tests Mapping"
 
@@ -167,8 +167,10 @@ document_metadata:
   participating_sigs: ["{sig-1}", "{sig-2}"]
 
   total_scenarios: {count}
-  tier_1_count: {count}           # tier mode only (0 in auto mode)
-  tier_2_count: {count}           # tier mode only (0 in auto mode)
+  tier_counts:                    # tier mode only (empty in auto mode)
+    "Tier 1": {count}
+    "Tier 2": {count}
+    # additional tiers as defined by project's tier*.yaml configs
   unit_count: {count}             # auto mode only (0 in tier mode)
   functional_count: {count}       # auto mode only (0 in tier mode)
   e2e_count: {count}              # auto mode only (0 in tier mode)
@@ -358,7 +360,7 @@ common_preconditions:
 scenarios:
   - scenario_id: "{NUM}"
     test_id: "TS-{JIRA_ID}-{NUM:03d}"
-    tier: "{Tier 1|Tier 2}"             # tier mode
+    tier: "{from tier-classifier}"       # tier mode — matches project's tier*.yaml configs
     test_type: "{unit|functional|e2e}"  # auto mode (use instead of tier)
     priority: "{P0|P1|P2}"
     mvp: {true|false}
@@ -550,11 +552,17 @@ In **auto mode**, skip this entire section — auto-detected projects do not hav
 libraries, decorators, or project-specific helpers. Auto-mode scenarios use a simpler
 structure: `test_objective`, `test_steps`, `assertions`, and reference `code_generation_config`.
 
-**CRITICAL (tier mode):** All scenarios MUST include pattern metadata for production-ready STD
+**CRITICAL (tier mode only):** All scenarios MUST include pattern metadata for production-ready STD.
+
+**Auto-discovery guard:** If `project_context.config_dir` is null, skip this entire
+Pattern Enhancement section. Auto-mode scenarios use `code_generation_config` from the
+STD YAML metadata instead of pattern libraries.
 
 For each scenario, analyze the description and automatically add pattern metadata using the rules below.
 
 ### Pattern Matching Rules
+
+**Requires:** `project_context.config_dir` is not null.
 
 Apply these rules to match scenarios to patterns from `{project_context.config_dir}/patterns/` directory:
 
@@ -743,6 +751,13 @@ CRITICAL - Pattern Enhancement (AUTO-GENERATED):
 - This is NOT optional - ALL scenarios MUST have pattern metadata
 
 Output only valid YAML. Do not include explanations outside the YAML structure.
+
+CHUNKED GENERATION (when called with a batch, not all scenarios):
+- The orchestrator may call you multiple times with batches of ~15 scenarios
+- First call: generate document_metadata + common_preconditions + code_generation_config + the batch of scenarios
+- Subsequent calls: generate ONLY the new batch of scenarios (YAML array items indented under `scenarios:`)
+- Do NOT regenerate metadata or common_preconditions on subsequent calls
+- Each batch output must be valid YAML fragments that can be appended to the scenarios array
 ```
 
 **User Prompt Template:**
@@ -877,11 +892,11 @@ STD generation is successful when:
 
 **Primary output:**
 
-- `outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml`
+- `outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml`
 
 **Example:**
 
-- `outputs/std/PROJ-66855/PROJ-66855_test_description.yaml`
+- `outputs/PROJ-66855/std/PROJ-66855_test_description.yaml`
 
 **Note:** This comprehensive STD YAML is the single source of truth for all test scenarios. It is used by downstream generators (stub-generator, test-generator) to produce test stubs and working test code.
 

@@ -25,12 +25,12 @@ This agent receives `project_context` from the invoking command, which includes:
 ## Input Required
 
 - `jira_id`: Jira ticket ID (e.g., "PROJ-66855")
-- `std_file_path`: Path to STD YAML file (e.g., `outputs/std/PROJ-66855/PROJ-66855_test_description.yaml`)
+- `std_file_path`: Path to STD YAML file (e.g., `outputs/PROJ-66855/std/PROJ-66855_test_description.yaml`)
 - `tier`: Target tier ("tier1" or "tier2")
 - `repo_paths`: **List** of repository paths to analyze (BOTH repos analyzed regardless of tier)
   - Read from `{project_context.config_dir}/repositories.yaml` to get repo paths (via `primary_repo.local_path_env` and `tier2_repo.local_path_env` environment variables).
   - **Rationale:** Both tier1 and tier2 tests may exist in both repos. We analyze both to find all relevant patterns.
-- `stp_file_path` *(optional)*: Path to the STP markdown file (e.g., `outputs/stp/{JIRA_ID}/{JIRA_ID}_test_plan.md`)
+- `stp_file_path` *(optional)*: Path to the STP markdown file (e.g., `outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md`)
   - Used by Phase 3B to extract PR references and feature gate names
   - If not provided, Phase 3B skips PR test pattern extraction (Step 3B.3)
 
@@ -42,8 +42,8 @@ This agent receives `project_context` from the invoking command, which includes:
 
 Location:
 
-- Tier 1: `outputs/go-tests/{JIRA_ID}/{JIRA_ID}_lsp_patterns.yaml`
-- Tier 2: `outputs/python-tests/{JIRA_ID}/{JIRA_ID}_lsp_patterns_tier2.yaml`
+- Tier 1: `outputs/{JIRA_ID}/go-tests/{JIRA_ID}_lsp_patterns.yaml`
+- Tier 2: `outputs/{JIRA_ID}/python-tests/{JIRA_ID}_lsp_patterns_tier2.yaml`
 
 Structure:
 
@@ -54,14 +54,14 @@ metadata:
   tier: tier1
   analysis_date: "2026-01-29"
   repository: "<repo path from repositories.yaml>"
-  std_source: "outputs/std/PROJ-66855/PROJ-66855_test_description.yaml"
+  std_source: "outputs/PROJ-66855/std/PROJ-66855_test_description.yaml"
 
 keywords_extracted:
-  - "localnet"
-  - "Fedora"
-  - "ping"
-  - "same-node"
-  - "connectivity"
+  - "password-reset"
+  - "email"
+  - "token"
+  - "expiry"
+  - "auth"
 
 patterns:
   helpers:
@@ -289,32 +289,32 @@ From each scenario:
 
 **Keyword categories to identify:**
 
-- **Network types**: localnet, bridge, masquerade, SR-IOV, macvtap, passt, flat_overlay
-- **OS/Images**: Fedora, RHEL, Alpine, CirrOS, Ubuntu
-- **Operations**: migration, reset, restart, snapshot, hotplug, eviction
-- **Connectivity**: ping, TCP, HTTP, SSH, port
-- **Infrastructure**: OVS, node, namespace, pod, service
-- **Storage**: DataResource, PVC, snapshot, resize, clone
+- **API types**: REST, GraphQL, gRPC, WebSocket, webhook
+- **Auth methods**: OAuth, JWT, API key, RBAC, SAML
+- **Operations**: create, update, delete, export, import, backup, restore
+- **Connectivity**: HTTP, TCP, health check, ping, port
+- **Infrastructure**: service, node, namespace, container, queue
+- **Storage**: database, cache, blob, backup, snapshot
 
 **Example extraction:**
 
 ```yaml
-# From scenario description: "Verify localnet connectivity between Fedora VMs on same node using ping"
+# From scenario description: "Verify password reset via email with token expiry"
 keywords:
-  - "localnet"         # Network type
-  - "Fedora"          # OS type
-  - "ping"            # Connectivity test
-  - "same-node"       # Node placement
-  - "connectivity"    # Test category
+  - "password-reset"   # Feature
+  - "email"           # Communication channel
+  - "token"           # Auth mechanism
+  - "expiry"          # Temporal constraint
+  - "auth"            # Feature category
 ```
 
 **Step 2.3: Prioritize keywords**
 
 Rank keywords by importance:
 
-1. **Primary**: Core technology (e.g., "localnet", "SR-IOV")
-2. **Secondary**: Supporting components (e.g., "Fedora", "OVS")
-3. **Tertiary**: Test methods (e.g., "ping", "HTTP")
+1. **Primary**: Core technology (e.g., "OAuth", "gRPC")
+2. **Secondary**: Supporting components (e.g., "Redis", "PostgreSQL")
+3. **Tertiary**: Test methods (e.g., "HTTP", "health check")
 
 ---
 
@@ -365,13 +365,13 @@ Example: "Localnet"
 - Type definitions
 - Constants
 
-**Example for "Localnet":**
+**Example for "password-reset":**
 
 ```
 Found symbols:
-- NewLocalnetConfig (function, libnetwork/config.go:123)
-- LocalnetNetworkDefinition (function, libnetwork/config.go:145)
-- localnetConfig (type, libnetwork/types.go:78)
+- NewResetToken (function, libauth/token.go:123)
+- ResetTokenValidator (function, libauth/token.go:145)
+- resetConfig (type, libauth/types.go:78)
 ```
 
 ---
@@ -397,8 +397,8 @@ Character: 6 (on function name)
 **Example:**
 
 ```go
-// NewLocalnetConfig creates a network configuration for localnet connectivity
-func NewLocalnetConfig(namespace, name string, vlanID int) *networkv1.NetworkDefinition {
+// NewResetToken creates a password reset token with expiry
+func NewResetToken(userID, email string, ttlMinutes int) *auth.ResetToken {
     // implementation
 }
 ```
@@ -409,9 +409,9 @@ func NewLocalnetConfig(namespace, name string, vlanID int) *networkv1.NetworkDef
 function: "{DiscoveredFunction}"
 signature: "func {DiscoveredFunction}(param1, param2 string, param3 int) *{ReturnType}"
 package: "{project_import_path}/tests/{package}"
-file: "tests/libnetwork/config.go"
+file: "tests/libauth/token.go"
 line: 123
-doc_comment: "Creates a network configuration for localnet connectivity"
+doc_comment: "Creates a password reset token with expiry"
 ```
 
 ---
@@ -438,11 +438,11 @@ Character: 6
 2. Extract complete usage example
 3. Identify common patterns
 
-**Example reference in tests/network/localnet_test.go:45:**
+**Example reference in tests/auth/reset_test.go:45:**
 
 ```go
-netConfig := libnetwork.NewLocalnetConfig(testsuite.GetTestNamespace(nil), "test-localnet", 100)
-netConfig, err := client.NetworkClient().NetworkDefinitions(namespace).Create(ctx, netConfig, metav1.CreateOptions{})
+token := libauth.NewResetToken(testUser.ID, testUser.Email, 30)
+result, err := client.AuthClient().ResetTokens(namespace).Create(ctx, token, opts)
 Expect(err).ToNot(HaveOccurred())
 ```
 
@@ -450,13 +450,13 @@ Expect(err).ToNot(HaveOccurred())
 
 ```yaml
 usage_examples:
-  - file: "tests/network/localnet_test.go"
+  - file: "tests/auth/reset_test.go"
     line: 45
     code: |
-      netConfig := libnetwork.NewLocalnetConfig(testsuite.GetTestNamespace(nil), "test-localnet", 100)
-      netConfig, err := client.NetworkClient().NetworkDefinitions(namespace).Create(ctx, netConfig, metav1.CreateOptions{})
+      token := libauth.NewResetToken(testUser.ID, testUser.Email, 30)
+      result, err := client.AuthClient().ResetTokens(namespace).Create(ctx, token, opts)
       Expect(err).ToNot(HaveOccurred())
-    pattern: "Network config creation with namespace, name, and VLAN ID"
+    pattern: "Reset token creation with user ID, email, and TTL"
 ```
 
 ---
@@ -575,7 +575,7 @@ Then recursively trace outgoing calls (max depth 5) to build the feature's call 
 | Status updater | Calls to functions that update resource status fields | `UpdateStatus(...)` |
 | API call | Calls to Kubernetes API (create, patch, delete) | `client.Patch(...)` |
 | Event emitter | Calls to event recording functions | `recorder.Event(...)` |
-| Migration trigger | Calls to migration-related functions | `StartMigration(...)` |
+| Async trigger | Calls to async operation functions | `StartAsync(...)` |
 
 **Output of this step:**
 
@@ -587,7 +587,7 @@ code_path:
       - "<callee function 1>"
       - "<callee function 2>"
     observable_behaviors:
-      - type: "condition_setter | status_updater | api_call | event_emitter | migration_trigger"
+      - type: "condition_setter | status_updater | api_call | event_emitter | async_trigger"
         function: "<function name>"
         description: "<what this observable means for testing>"
 ```
@@ -816,8 +816,8 @@ validation:
 
 Location:
 
-- Tier 1: `outputs/go-tests/{JIRA_ID}/{JIRA_ID}_lsp_patterns.yaml`
-- Tier 2: `outputs/python-tests/{JIRA_ID}/{JIRA_ID}_lsp_patterns_tier2.yaml`
+- Tier 1: `outputs/{JIRA_ID}/go-tests/{JIRA_ID}_lsp_patterns.yaml`
+- Tier 2: `outputs/{JIRA_ID}/python-tests/{JIRA_ID}_lsp_patterns_tier2.yaml`
 
 **Step 6.3: Generate summary report**
 
@@ -827,7 +827,7 @@ Human-readable summary:
 # LSP Pattern Analysis Summary - PROJ-66855
 
 **Analysis Date:** 2026-01-29
-**Tier:** Tier 1 (Go/Ginkgo)
+**Tier:** {from tier config}
 **Repository:** {from repositories.yaml}
 
 ## Keywords Extracted (5)
@@ -970,16 +970,16 @@ Task tool:
 
     Analyze patterns for:
     - jira_id: "{JIRA_ID}"
-    - std_file_path: "outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml"
+    - std_file_path: "outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml"
     - tier: "tier1"
     - repo_paths: [<from repositories.yaml primary_repo.local_path_env>, <from repositories.yaml tier2_repo.local_path_env>]
 
     Optional (for Phase 3B code-path tracing):
-    - stp_file_path: "outputs/stp/{JIRA_ID}/{JIRA_ID}_test_plan.md"
+    - stp_file_path: "outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md"
 
     Output:
-    - outputs/go-tests/{JIRA_ID}/{JIRA_ID}_lsp_patterns.yaml (detailed patterns)
-    - outputs/go-tests/{JIRA_ID}/{JIRA_ID}_lsp_summary.md (human-readable summary)
+    - outputs/{JIRA_ID}/go-tests/{JIRA_ID}_lsp_patterns.yaml (detailed patterns)
+    - outputs/{JIRA_ID}/go-tests/{JIRA_ID}_lsp_summary.md (human-readable summary)
 ```
 
 ---

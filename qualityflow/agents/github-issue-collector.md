@@ -26,7 +26,7 @@ Must invoke this skill during execution:
 This agent receives `project_context` from the orchestrator, which includes:
 - `config_dir`: Path to the project configuration directory
 - `github_issue`: Object with `owner`, `repo`, `number`, `url`
-- `jira_id`: Canonical filesystem-safe ID (e.g., `kubevirt-kubevirt-1234`)
+- `jira_id`: Canonical filesystem-safe ID (e.g., `my-org-my-repo-1234`)
 - `stp_header`: The expected STP document header
 - `versioning`: Version derivation information
 
@@ -83,6 +83,8 @@ for discovering PRs, related issues, and Jira tickets.
 #### 3.1 GitHub PR URLs
 
 Pattern: `https://github.com/{owner}/{repo}/pull/{number}`
+Also match enterprise GitHub: `https://{github_host}/{owner}/{repo}/pull/{number}`
+where `{github_host}` is any hostname (supports `github.company.com` etc.)
 
 For each match, add to `pr_urls`:
 ```yaml
@@ -95,6 +97,7 @@ For each match, add to `pr_urls`:
 #### 3.2 GitHub Issue URLs
 
 Pattern: `https://github.com/{owner}/{repo}/issues/{number}`
+Also match enterprise GitHub: `https://{github_host}/{owner}/{repo}/issues/{number}`
 
 Exclude the main issue itself. For each match, add to `github_issue_urls`:
 ```yaml
@@ -106,7 +109,7 @@ Exclude the main issue itself. For each match, add to `github_issue_urls`:
 
 #### 3.3 Jira Issue URLs
 
-Pattern: `https://redhat.atlassian.net/browse/{KEY}` or legacy URLs from `jira_legacy_urls`
+Pattern: `https://your-org.atlassian.net/browse/{KEY}` or legacy URLs from `jira_legacy_urls`
 
 For each match, add to `jira_issue_urls`:
 ```yaml
@@ -229,7 +232,7 @@ For EACH Jira issue URL discovered in Step 3.3:
 
 Record as a linked issue with `relationship: "cross_reference"`:
 ```yaml
-- key: <Jira key, e.g., CNV-66855>
+- key: <Jira key, e.g., PROJ-12345>
   summary: <summary>
   description: <description>
   status: <status>
@@ -362,7 +365,7 @@ Assemble the output in the same YAML structure as jira-collector.
 Return YAML:
 ```yaml
 main_issue:
-  key: kubevirt-kubevirt-1234
+  key: my-org-my-repo-1234
   summary: <issue title>
   description: <issue body>
   status: <open|closed>
@@ -419,7 +422,7 @@ subtasks: []
 
 pr_urls:
   - url: https://github.com/<owner>/<repo>/pull/<number>
-    source_issue: kubevirt-kubevirt-1234
+    source_issue: my-org-my-repo-1234
     source_type: description
     is_main_issue: true
   - url: https://github.com/<owner>/<repo>/pull/<number>
@@ -430,14 +433,14 @@ pr_urls:
 
 github_issue_urls:
   - url: https://github.com/<owner>/<repo>/issues/<number>
-    source_issue: kubevirt-kubevirt-1234
+    source_issue: my-org-my-repo-1234
     source_type: description
     is_main_issue: true
   - ...
 
 jira_issue_urls:
-  - url: https://redhat.atlassian.net/browse/<KEY>
-    source_issue: kubevirt-kubevirt-1234
+  - url: https://your-org.atlassian.net/browse/<KEY>
+    source_issue: my-org-my-repo-1234
     source_type: description
     is_main_issue: true
   - ...
@@ -450,9 +453,9 @@ feature_candidates:
     - component: sig-network
       package_path: pkg/network/
   acceptance_criteria:
-    - VM can attach volume while running
+    - Service can reload config without restart
   integration_points:
-    - Live Migration (from linked issue)
+    - Data replication (from linked issue)
 
 dependency_graph:
   blocking: [<issues this blocks>]
@@ -478,7 +481,7 @@ are issue URLs. The path segment is the discriminator.
 ### Jira URL Patterns
 
 Scan for URLs matching:
-- Canonical: `https://redhat.atlassian.net/browse/{KEY}`
+- Canonical: `https://your-org.atlassian.net/browse/{KEY}`
 - Legacy: URLs from `config/_defaults.yaml` `jira_legacy_urls`
 
 Normalize all Jira URLs to canonical form in output.

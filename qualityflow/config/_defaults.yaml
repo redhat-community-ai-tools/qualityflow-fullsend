@@ -4,7 +4,9 @@ version: "1.0"
 
 feature_toggles:
   test_case_markers: false
+  polarion: false
   unit_tests: false
+  exclude_unit_from_stp: false
   test_strategy: "auto"    # "auto" = detect from repo; "tier" = use tier1.yaml/tier2.yaml
   tier1_tests: true
   tier2_tests: true
@@ -17,18 +19,33 @@ feature_toggles:
   repo_files_fetch: true
 
 output_structure:
-  stp: "outputs/stp/{JIRA_ID}/{JIRA_ID}_test_plan.md"
-  std: "outputs/std/{JIRA_ID}/{JIRA_ID}_test_description.yaml"
-  go_stubs: "outputs/std/{JIRA_ID}/go-tests/{feature}_stubs_test.go"
-  python_stubs: "outputs/std/{JIRA_ID}/python-tests/test_{feature}_stubs.py"
-  go_tests: "{target_test_directory}/qf_{feature}_test.go"
-  python_tests: "{target_test_directory}/qf_test_{feature}.py"
-  go_tests_fallback: "outputs/go-tests/{JIRA_ID}/qf_{feature}_test.go"
-  python_tests_fallback: "outputs/python-tests/{JIRA_ID}/qf_test_{feature}.py"
-  stp_review: "outputs/reviews/{JIRA_ID}/{JIRA_ID}_stp_review.md"
-  std_review: "outputs/reviews/{JIRA_ID}/{JIRA_ID}_std_review.md"
+  stp: "outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md"
+  std: "outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml"
+  stubs: "outputs/{JIRA_ID}/std/{language}-tests/{feature}_stubs{ext}"
+  tests: "{target_test_directory}/qf_{feature}{ext}"
+  tests_fallback: "outputs/{JIRA_ID}/{language}-tests/qf_{feature}{ext}"
+  # Language-specific filename conventions (used by stub/test generators):
+  #   Go:     {feature}_stubs_test.go / qf_{feature}_test.go
+  #   Python: test_{feature}_stubs.py / qf_test_{feature}.py
+  stp_review: "outputs/{JIRA_ID}/reviews/{JIRA_ID}_stp_review.md"
+  std_review: "outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_review.md"
 
 test_file_prefix: "qf_"
+
+# Canonical data formats — all agents and skills MUST use these exact values
+canonical_formats:
+  # Tier values (case-sensitive). Consumers MUST match on prefix:
+  # "Tier 1 (Functional)" matches "Tier 1". Both forms are valid.
+  # Projects define their own tiers via tier*.yaml configs. Common defaults below.
+  tier_values:
+    tier_mode: ["Tier 1", "Tier 1 (Functional)", "Tier 2", "Tier 2 (End-to-End)"]  # extensible via tier*.yaml
+    auto_mode: ["unit", "functional", "integration", "e2e"]
+  # Priority values (uppercase, always strings)
+  priority_values: ["P0", "P1", "P2"]
+  # Pipeline phase status values (for state tracking and error reporting)
+  phase_status: ["pending", "in_progress", "completed", "failed", "skipped"]
+  # Review verdicts
+  review_verdicts: ["APPROVED", "APPROVED_WITH_FINDINGS", "NEEDS_REVISION"]
 
 test_id_format: "TS-{JIRA_ID}-{NUM:03d}"
 
@@ -38,5 +55,16 @@ pii_rules:
   hostnames: "worker-node-{N}"
   domains: "example.com"
 
+jira_legacy_urls:
+  - url: "https://your-jira-instance.example.com"
+    browse_pattern: "https://your-jira-instance.example.com/browse/{key}"
+
 stp_defaults:
   feature_title_suffix: "Quality Engineering Plan"
+  sign_off:
+    reviewer_sources:
+      - field: "jira_assignee"
+        role: "Reviewer"
+      - field: "jira_reporter"
+        role: "Approver"
+    fallback_format: "[Name / @github-username]"

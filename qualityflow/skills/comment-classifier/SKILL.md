@@ -31,21 +31,21 @@ comments:
   - id: 12345
     author: "reviewer-username"
     body: "This scenario references internal reconciler logic"
-    path: "stps/sig-storage/remove-velero-hooks-stp.md"  # or outputs/CNV-12345/stp/...
+    path: "stps/storage/remove-hooks-stp.md"  # or outputs/PROJ-12345/stp/...
     line: 142
     section: "III"
     in_reply_to: null
   - id: 12346
     author: "coderabbitai[bot]"
-    body: "Missing negative test scenario for the hot-plug operation"
-    path: "stps/sig-storage/remove-velero-hooks-stp.md"
+    body: "Missing negative test scenario for this operation"
+    path: "outputs/PROJ-12345/stp/PROJ-12345_test_plan.md"
     line: 155
     section: "III"
     in_reply_to: null
   - id: 12347
     author: "team-lead"
-    body: "This requirement is out of scope for 4.19"
-    path: "stps/sig-storage/remove-velero-hooks-stp.md"
+    body: "This requirement is out of scope for this release"
+    path: "outputs/PROJ-12345/stp/PROJ-12345_test_plan.md"
     line: 98
     section: "III"
     in_reply_to: null
@@ -107,19 +107,19 @@ classification:
       context:
         target_line: 155
         section: "III"
-        requirement_id: "CNV-12345"
-        guidance: "Generate negative scenario for hot-plug operation"
+        requirement_id: "PROJ-12345"
+        guidance: "Generate negative scenario for the operation"
 
   propose_fix:
     - comment_id: 12348
       category: "researchable"
       severity: "MAJOR"
       research_sources:
-        - type: "vep"
-          url: "https://github.com/kubevirt/kubevirt/issues/14056"
+        - type: "issue"
+          url: "https://github.com/my-org/my-repo/issues/14056"
         - type: "jira"
-          key: "CNV-72329"
-      proposed_text: "Scale testing: validate hook removal on 10+ VMs with concurrent backup operations"
+          key: "PROJ-72329"
+      proposed_text: "Scale testing: validate hook removal on 10+ instances with concurrent backup operations"
       confidence: "medium"
       context:
         target_line: 180
@@ -231,6 +231,16 @@ The comment asks to remove specific text from the document:
 
 **Fix skill:** template-engine
 **Fix action:** update-metadata (targeted text deletion)
+
+#### 8. PR Title Update (`title-update`)
+
+The comment asks to change the PR title:
+
+**Trigger patterns:** "change title", "update title", "rename PR", "title should be"
+**Condition:** The comment provides the new title text or clearly describes what it should be.
+
+**Fix skill:** N/A (handled directly by fix-pr via `gh pr edit --title`)
+**Fix action:** update-title
 
 ### Propose-Fix Categories
 

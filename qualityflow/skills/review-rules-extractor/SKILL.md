@@ -52,7 +52,11 @@ The skill receives the Jira ID as its argument (e.g., `PROJ-123`) but primarily 
 
 ### Phase 0: Read Existing Config Files
 
-Read the following files from `{config_dir}`. All reads are fast local file operations.
+**Auto-discovery guard:** If `config_dir` is null (auto-discovered project),
+skip all config file reads. All fields in the output will use defaults.
+Set `_extraction_metadata.default_ratio` to 1.0 and note "config_dir: null (auto-discovery mode)".
+
+**When config_dir is available:** Read the following files from `{config_dir}`. All reads are fast local file operations.
 Missing files are not errors -- skip and note what was unavailable.
 
 | File | Key data extracted |
@@ -77,8 +81,8 @@ defined source and transformation logic:
 | Output key | Source | Logic |
 |:-----------|:-------|:------|
 | `stp_rules.abstraction.internal_components` | `components.yaml` keys | Extract component names from `component_package_map` keys |
-| `stp_rules.testing_tools.standard_tools` | `project.yaml` cli_tools + tier1/tier2 frameworks | Combine: start with `cli_tools`, add framework display names |
-| `stp_rules.testing_tools.standard_frameworks` | `tier1.yaml` framework + `tier2.yaml` framework | Transform to display names (e.g., `"ginkgo-v2"` → `"Ginkgo v2"`). Also add known CI systems if identifiable from config. |
+| `stp_rules.testing_tools.standard_tools` | `project.yaml` cli_tools + tier config frameworks | Combine: start with `cli_tools`, add framework display names from all `tier*.yaml` |
+| `stp_rules.testing_tools.standard_frameworks` | All `tier*.yaml` framework fields | Transform to display names (e.g., `"ginkgo-v2"` → `"Ginkgo v2"`). Also add known CI systems if identifiable from config. |
 | `stp_rules.upgrade.persistent_state_indicators` | `components.yaml` feature names | Scan feature names for CRD-like indicators. If features reference CRDs, configs, or stored state, include `["CRD", "stored config"]`. If lifecycle features exist, include `"running instance with feature-dependent data"`. |
 
 #### STD Rules
@@ -86,20 +90,20 @@ defined source and transformation logic:
 | Output key | Source | Logic |
 |:-----------|:-------|:------|
 | `std_rules.patterns.sig_to_decorator` | `project.yaml` decorator_mappings | Strip prefix from keys and map to decorator values |
-| `std_rules.patterns.closure_scope_required` | `tier1.yaml` context_init[].variable | Extract variable names: `["ctx", "namespace"]` |
+| `std_rules.patterns.closure_scope_required` | Go tier config `context_init[].variable` | Extract variable names from whichever tier config uses Go |
 | `std_rules.patterns.test_id_format` | `_defaults.yaml` test_id_format | Direct copy: `"TS-{JIRA_ID}-{NUM:03d}"` |
-| `std_rules.patterns.ginkgo_structure` | `tier1.yaml` framework | If framework is `"ginkgo-v2"`: output `"Context -> BeforeAll -> It"`. Otherwise, derive from framework name. |
-| `std_rules.patterns.keyword_to_pattern` | `patterns/tier1_patterns.yaml` template_selection | For each template_selection entry, extract keywords from `conditions[].match_any` and `conditions[].match_all`, map them to the entry `name` as the pattern ID. Example: `connectivity: "network-connectivity-001"` |
-| `std_rules.patterns.pattern_to_helpers` | `tier1.yaml` helper_libraries + pattern keywords | Map pattern IDs to their required helper libraries based on keyword overlap |
-| `std_rules.timeouts` | `tier1.yaml` timeout_constants | Map operation types to timeout ranges. Example: `vm_startup: "medium to large"`, `api_call: "tiny to small"` |
-| `std_rules.stub_conventions` | `tier1.yaml` + `tier2.yaml` framework | Derive from frameworks: if ginkgo-v2, `go_pending: "PendingIt()"`, `go_skip: "Skip()"`. If pytest, `python_pending: "pass"`, `python_test_disabled: "__test__ = False"`. If tier1 uses sig-based packages, `go_package_from_sig: true`. |
+| `std_rules.patterns.framework_structure` | Tier configs' framework fields | Derive from framework: `"ginkgo-v2"` → `"Context -> BeforeAll -> It"`, `"pytest"` → `"class -> def"`, etc. |
+| `std_rules.patterns.keyword_to_pattern` | `patterns/` YAML files `template_selection` | For each template_selection entry, extract keywords from `conditions[].match_any` and `conditions[].match_all`, map them to the entry `name` as the pattern ID |
+| `std_rules.patterns.pattern_to_helpers` | Tier configs' `helper_libraries` + pattern keywords | Map pattern IDs to their required helper libraries based on keyword overlap |
+| `std_rules.timeouts` | Tier configs' `timeout_constants` | Map operation types to timeout ranges. Example: `startup: "medium to large"`, `api_call: "tiny to small"` |
+| `std_rules.stub_conventions` | All `tier*.yaml` framework fields | Derive from each tier's framework: ginkgo-v2 → `pending: "PendingIt()"`, pytest → `pending: "pass"`, etc. |
 
 ### Phase 1.5: Extract from repo_rules (if available)
 
 When `project_context.repo_rules` is populated (by project-resolver Step 9 repo_files
 fetch), extract review-relevant data from the fetched team-owned config files.
 
-**From `repo_rules.agents_rules` (AGENTS.md):**
+**From `repo_rules.agents_rules` (AGENTS.md) — STD conventions:**
 
 | Extracted data | Output key | Logic |
 |:---------------|:-----------|:------|
@@ -107,6 +111,14 @@ fetch), extract review-relevant data from the fetched team-owned config files.
 | Forbidden patterns | `std_rules.stub_conventions.forbidden_patterns` | Extract banned patterns (e.g., `pytest.skip`, `pytest.skipif`, defensive programming) |
 | Fixture naming rules | `std_rules.stub_conventions.fixture_naming` | Extract naming convention (e.g., `"nouns_only"`) |
 | Dependency mechanism | `std_rules.stub_conventions.dependency_mechanism` | Extract required mechanism (e.g., `"@pytest.mark.incremental"`, not `pytest-dependency`) |
+
+**From `repo_rules.agents_rules` (AGENTS.md) — STP conventions:**
+
+| Extracted data | Output key | Logic |
+|:---------------|:-----------|:------|
+| Tier naming conventions | `stp_rules.tiers.naming_convention` | Extract tier names and labels used by the team (e.g., "Tier 3 (Specialized)") to validate STP tier labels match team standard |
+| Document format requirements | `stp_rules.conventions.document_format` | Extract any STP document format rules (section ordering, required fields, format constraints) |
+| Terminology preferences | `stp_rules.conventions.terminology` | Extract domain terminology preferences and required/forbidden terms for STP documents |
 
 **From `repo_rules.stp_template` (official STP template):**
 
@@ -190,6 +202,9 @@ hardcoded defaults:
 | `stp_rules.strategy.requires_justification_for_y` | `{"Performance Testing": "latency/throughput requirements", "Security Testing": "RBAC, auth, or security boundary changes", "Usability Testing": "UI component"}` | Standard criteria |
 | `stp_rules.metadata.version_source` | `"fix_version"` | Standard Jira field |
 | `stp_rules.scope.layered_product` | `null` | Null means skip layered product check |
+| `stp_rules.tiers.naming_convention` | `{}` | No naming convention override without AGENTS.md |
+| `stp_rules.conventions.document_format` | `{}` | No format override without AGENTS.md |
+| `stp_rules.conventions.terminology` | `{}` | No terminology override without AGENTS.md |
 
 ## Output
 
@@ -223,6 +238,11 @@ review_rules:
       version_source: "fix_version"
     scope:
       layered_product: null | { name, platform, platform_teams, ownership_note }
+    tiers:
+      naming_convention: { ... }         # from repo_rules.agents_rules (STP conventions)
+    conventions:
+      document_format: { ... }           # from repo_rules.agents_rules (STP conventions)
+      terminology: { ... }               # from repo_rules.agents_rules (STP conventions)
 
   std_rules:
     patterns:
