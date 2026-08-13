@@ -1,0 +1,51 @@
+# Warns when the vendored qualityflow/ copy drifts from upstream qualityflow main.
+# The vendored dir is a manual copy (scripts/sync-qualityflow.sh), not a submodule,
+# so nothing keeps it current automatically — this check is the guard rail.
+name: vendor-drift
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'qualityflow/.qualityflow-source'
+      - '.github/workflows/vendor-drift.yaml'
+  schedule:
+    - cron: '0 7 * * 1'   # Mondays 07:00 UTC
+  workflow_dispatch:
+
+jobs:
+  drift:
+    name: Check vendored qualityflow is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compare vendored SHA against upstream main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          vendored=$(grep '^commit:' qualityflow/.qualityflow-source | awk '{print $2}')
+          upstream=$(gh api repos/redhat-community-ai-tools/qualityflow/commits/main --jq '.sha')
+          echo "vendored: $vendored"
+          echo "upstream: $upstream"
+          if [ "$vendored" = "$upstream" ]; then
+            echo "In sync."
+            exit 0
+          fi
+          behind=$(gh api "repos/redhat-community-ai-tools/qualityflow/compare/${vendored}...${upstream}" --jq '.ahead_by')
+          {
+            echo "### ⚠️ Vendored qualityflow is stale"
+            echo ""
+            echo "Vendored copy is **${behind} commit(s)** behind upstream \`main\`."
+            echo ""
+            echo "| | commit |"
+            echo "|---|---|"
+            echo "| vendored | \`${vendored}\` |"
+            echo "| upstream main | \`${upstream}\` |"
+            echo ""
+            echo "Run \`./scripts/sync-qualityflow.sh\`, commit, and cut a new tag."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Vendored qualityflow is ${behind} commit(s) behind upstream main. Run scripts/sync-qualityflow.sh."
+          exit 1
