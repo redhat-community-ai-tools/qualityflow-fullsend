@@ -69,9 +69,16 @@ plugins:
   - plugins/gopls-lsp
 
 runner_env:
-  JIRA_TICKET: "${JIRA_TICKET}"
+  # This is the GitHub-flow entry point. FullSend's harness-run job provides
+  # GITHUB_ISSUE_URL and REPO_FULL_NAME on the host; it does NOT provide
+  # JIRA_TICKET or TARGET_BRANCH, and fullsend's env validator rejects any
+  # ${VAR} that is unset or empty on the host — so only host-provided vars
+  # may use ${...} here. Jira teams set JIRA_TICKET (and blank
+  # GITHUB_ISSUE_URL) via runner_env override in their harness overlay.
+  GITHUB_ISSUE_URL: "${GITHUB_ISSUE_URL}"
+  JIRA_TICKET: ""
   REPO_FULL_NAME: "${REPO_FULL_NAME}"
-  TARGET_BRANCH: "${TARGET_BRANCH}"
+  TARGET_BRANCH: "main"
   ISSUE_SOURCE: "github"
   FULLSEND_OUTPUT_SCHEMA: ${FULLSEND_DIR}/schemas/stp-builder-result.schema.json
 
