@@ -285,7 +285,7 @@ jobs:
           # Authenticate and push
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO_NAME}.git"
           git add outputs/
-          git commit -m "Add QualityFlow output for $JIRA_TICKET [skip ci]" || true
+          git commit -m "Add QualityFlow output for $JIRA_TICKET" || true
           git push origin "HEAD:$BRANCH" || echo "Push failed — output available in sandbox artifacts"
           ```
 
@@ -354,7 +354,7 @@ jobs:
             git -C "${PR_REPO}" config user.email "qualityflow[bot]@users.noreply.github.com"
             git -C "${PR_REPO}" config user.name "QualityFlow"
             git -C "${PR_REPO}" add "outputs/stp/${JIRA_TICKET}/"
-            git -C "${PR_REPO}" commit -m "Add STP output for ${JIRA_TICKET} [skip ci]" || true
+            git -C "${PR_REPO}" commit -m "Add STP output for ${JIRA_TICKET}" || true
             git -C "${PR_REPO}" push origin "HEAD:${HEAD_REF}" || echo "::warning::STP push failed — downstream stages may not find STP"
             echo "::notice::STP recovered from FullSend extraction and pushed to PR branch"
           fi
@@ -421,7 +421,7 @@ jobs:
           # Authenticate and push
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO_NAME}.git"
           git add outputs/
-          git commit -m "Add QualityFlow output for $JIRA_TICKET [skip ci]" || true
+          git commit -m "Add QualityFlow output for $JIRA_TICKET" || true
           git push origin "HEAD:$BRANCH" || echo "Push failed — output available in sandbox artifacts"
           ```
 
@@ -516,7 +516,7 @@ jobs:
           # Authenticate and push
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO_NAME}.git"
           git add outputs/
-          git commit -m "Add QualityFlow output for $JIRA_TICKET [skip ci]" || true
+          git commit -m "Add QualityFlow output for $JIRA_TICKET" || true
           git push origin "HEAD:$BRANCH" || echo "Push failed — output available in sandbox artifacts"
           ```
 
@@ -611,7 +611,7 @@ jobs:
           # Authenticate and push
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO_NAME}.git"
           git add outputs/
-          git commit -m "Add QualityFlow output for $JIRA_TICKET [skip ci]" || true
+          git commit -m "Add QualityFlow output for $JIRA_TICKET" || true
           git push origin "HEAD:$BRANCH" || echo "Push failed — output available in sandbox artifacts"
           ```
 
@@ -698,7 +698,7 @@ jobs:
               git -C "${PR_REPO}" config user.email "qualityflow[bot]@users.noreply.github.com"
               git -C "${PR_REPO}" config user.name "QualityFlow"
               git -C "${PR_REPO}" add "outputs/std/${JIRA_TICKET}/"
-              git -C "${PR_REPO}" commit -m "Add STD output for ${JIRA_TICKET} [skip ci]" || true
+              git -C "${PR_REPO}" commit -m "Add STD output for ${JIRA_TICKET}" || true
               git -C "${PR_REPO}" push origin "HEAD:${HEAD_REF}" || echo "::warning::STD push failed"
               echo "::notice::STD recovered from FullSend extraction and pushed to PR branch"
             else
@@ -757,7 +757,7 @@ jobs:
           # Authenticate and push
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO_NAME}.git"
           git add outputs/
-          git commit -m "Add QualityFlow output for $JIRA_TICKET [skip ci]" || true
+          git commit -m "Add QualityFlow output for $JIRA_TICKET" || true
           git push origin "HEAD:$BRANCH" || echo "Push failed — output available in sandbox artifacts"
           ```
 
@@ -852,7 +852,7 @@ jobs:
           # Authenticate and push
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO_NAME}.git"
           git add outputs/
-          git commit -m "Add QualityFlow output for $JIRA_TICKET [skip ci]" || true
+          git commit -m "Add QualityFlow output for $JIRA_TICKET" || true
           git push origin "HEAD:$BRANCH" || echo "Push failed — output available in sandbox artifacts"
           ```
 
@@ -958,7 +958,7 @@ jobs:
           # Also stage metadata for post-pipeline summary
           git add outputs/ 2>/dev/null || true
 
-          git commit -m "Add QualityFlow tests for $JIRA_TICKET [skip ci]" || true
+          git commit -m "Add QualityFlow tests for $JIRA_TICKET" || true
           git push origin "HEAD:$BRANCH" || echo "Push failed — output available in sandbox artifacts"
           ```
 
@@ -1080,7 +1080,7 @@ jobs:
           Removes intermediate pipeline artifacts (STP, STD, reviews).
           Test files (${TOTAL_COUNT}) are co-located in source tree with qf_ prefix.
           Jira: ${JIRA_TICKET}
-          [skip ci]"
+          "
 
           git push origin "HEAD:${HEAD_REF}"
           echo "::notice::Cleaned artifacts, ${TOTAL_COUNT} test files in source tree"
