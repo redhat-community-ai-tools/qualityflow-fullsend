@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["pyyaml"]
+# ///
 """Validate QualityFlow project configurations against _schema.yaml."""
 
+import re
 import sys
 from pathlib import Path
 
@@ -9,6 +14,9 @@ try:
 except ImportError:
     print("Error: PyYAML required. Install with: pip install pyyaml")
     sys.exit(1)
+
+# The only two modes any consumer understands (see CLAUDE.md "Feature Toggles").
+TEST_STRATEGIES = {"auto", "tier"}
 
 
 def load_yaml(path: Path) -> dict | Exception | None:
@@ -48,6 +56,20 @@ def validate_project(project_dir: Path, schema: dict, defaults: dict) -> list[st
         if isinstance(result, Exception):
             errors.append(f"  YAML syntax error in {fname}: {result}")
 
+    # 1b. Issue sources: at least one of issue_source_files must exist and parse
+    source_files = schema.get("issue_source_files", ["jira.yaml", "github.yaml"])
+    has_source = False
+    for fname in source_files:
+        result = load_yaml(project_dir / fname)
+        if result is None:
+            continue
+        if isinstance(result, Exception):
+            errors.append(f"  YAML syntax error in {fname}: {result}")
+        else:
+            has_source = True
+    if not has_source:
+        errors.append(f"  No issue source configured: at least one of {', '.join(source_files)} must exist and parse")
+
     # 2. Load project.yaml for toggle checks
     project_data = load_yaml(project_dir / "project.yaml")
     if project_data is None or isinstance(project_data, Exception):
@@ -60,6 +82,7 @@ def validate_project(project_dir: Path, schema: dict, defaults: dict) -> list[st
         "repositories.yaml": "repositories_yaml",
         "components.yaml": "components_yaml",
         "jira.yaml": "jira_yaml",
+        "github.yaml": "github_yaml",
     }
     for fname, schema_key in file_validators.items():
         fpath = project_dir / fname
@@ -77,29 +100,64 @@ def validate_project(project_dir: Path, schema: dict, defaults: dict) -> list[st
     if pid != project_name:
         errors.append(f"  project_id '{pid}' does not match directory name '{project_name}'")
 
-    # 5. Toggle-to-file consistency
+    # 5. Tier-config consistency: when test_strategy == "tier", at least one
+    #    tier*.yaml must exist. Rule shape matches _schema.yaml's tier_consistency
+    #    (a single dict with condition/requires_glob/error).
     merged_toggles = {**defaults.get("feature_toggles", {}), **project_data.get("feature_toggles", {})}
-    for rule in schema.get("toggle_consistency", []):
-        toggle_name = rule["toggle"]
-        required_file = rule["requires_file"]
-        condition = rule.get("condition", "")
+    # 5a. test_strategy enum. Without this, a typo ("teir"/"bogus_mode") falls
+    #     through every rule below (tier_consistency only fires on == 'tier')
+    #     and the project silently behaves as auto-mode.
+    strategy = merged_toggles.get("test_strategy")
+    if strategy is not None and strategy not in TEST_STRATEGIES:
+        errors.append(f"  Invalid test_strategy {strategy!r} in project.yaml "
+                      f"(must be one of: {', '.join(sorted(TEST_STRATEGIES))})")
+    rule = schema.get("tier_consistency")
+    if isinstance(rule, dict) and "test_strategy == 'tier'" in rule.get("condition", ""):
+        if merged_toggles.get("test_strategy") == "tier":
+            if not list(project_dir.glob(rule.get("requires_glob", "tier*.yaml"))):
+                errors.append(f"  {rule['error']}")
 
-        if "test_strategy == 'tier'" in condition and merged_toggles.get("test_strategy") != "tier":
+    # 5b. scenario_tiers: the labels STP/STD scenarios carry in auto mode.
+    #     Each needs a "Tier N" label and a description the classifier decides
+    #     by; a malformed list would silently fall back to test-type labels.
+    tiers = project_data.get("scenario_tiers")
+    if tiers is not None:
+        if not isinstance(tiers, list) or not tiers:
+            errors.append("  scenario_tiers must be a non-empty list")
+        else:
+            for i, t in enumerate(tiers):
+                if not isinstance(t, dict) or not re.fullmatch(r"Tier \d", str(t.get("tier", ""))) \
+                        or not str(t.get("description", "")).strip():
+                    errors.append(f"  scenario_tiers[{i}] needs tier: 'Tier <N>' and a description")
+
+    # 5b2. stub_marks: pytest mark names every Python stub carries.
+    marks = project_data.get("stub_marks")
+    if marks is not None and not (isinstance(marks, list) and all(
+            isinstance(m, str) and re.fullmatch(r"[A-Za-z_]\w*", m) for m in marks)):
+        errors.append("  stub_marks must be a list of pytest mark names, e.g. [manual]")
+
+    # 5c. stakeholders: STP Section IV names. A malformed entry would silently
+    #     drop a person from every STP's sign-off list.
+    people = project_data.get("stakeholders")
+    if people is not None:
+        if not isinstance(people, dict):
+            errors.append("  stakeholders must be a mapping of default_reviewers/default_approvers")
+        else:
+            for key in ("default_reviewers", "default_approvers"):
+                for i, p in enumerate(people.get(key) or []):
+                    if not isinstance(p, dict) or not str(p.get("name", "")).strip():
+                        errors.append(f"  stakeholders.{key}[{i}] needs a name")
+
+    # 6. Validate every tier*.yaml against the generic tier_yaml field spec.
+    field_spec = schema.get("validation", {}).get("tier_yaml", {})
+    required = field_spec.get("required_fields", [])
+    for fpath in sorted(project_dir.glob("tier*.yaml")):
+        if fpath.name.endswith(".example"):
             continue
-
-        if merged_toggles.get(toggle_name, False) and not (project_dir / required_file).exists():
-            errors.append(f"  {rule['error']}")
-
-    # 6. Validate tier YAML required fields if they exist
-    for tier_file, schema_key in [("tier1.yaml", "tier1_yaml"), ("tier2.yaml", "tier2_yaml")]:
-        fpath = project_dir / tier_file
-        if fpath.exists():
-            data = load_yaml(fpath)
-            if data is None or isinstance(data, Exception):
-                continue
-            field_spec = schema.get("validation", {}).get(schema_key, {})
-            required = field_spec.get("required_fields", [])
-            errors.extend(check_required_fields(data, required, tier_file))
+        data = load_yaml(fpath)
+        if data is None or isinstance(data, Exception):
+            continue
+        errors.extend(check_required_fields(data, required, fpath.name))
 
     return errors
 
@@ -115,10 +173,32 @@ def validate_routing(config_dir: Path) -> list[str]:
         return errors
 
     projects_dir = config_dir / "projects"
+    seen_prefixes: dict[str, str] = {}
+    seen_repos: dict[str, str] = {}
     for route in routing.get("routes", []):
         project_name = route.get("project", "")
+        if not (route.get("jira_prefixes") or route.get("github_repos")):
+            errors.append(f"routing.yaml: route '{project_name}' has no jira_prefixes or github_repos, so nothing routes to it")
         if not (projects_dir / project_name).is_dir():
             errors.append(f"routing.yaml: route references project '{project_name}' but config/projects/{project_name}/ does not exist")
+        # Duplicate prefixes/repos across routes: first-match-wins would silently misroute
+        for prefix in route.get("jira_prefixes") or []:
+            if prefix in seen_prefixes:
+                errors.append(f"routing.yaml: jira prefix '{prefix}' appears in both '{seen_prefixes[prefix]}' and '{project_name}' routes (first match wins — remove one)")
+            else:
+                seen_prefixes[prefix] = project_name
+        for repo in route.get("github_repos") or []:
+            if not isinstance(repo, str) or not re.fullmatch(r"[^/\s]+/[^/\s]+", repo):
+                errors.append(f"routing.yaml: github_repos entry {repo!r} in route '{project_name}' is not an 'owner/repo' string")
+                continue
+            if repo in seen_repos:
+                errors.append(f"routing.yaml: github repo '{repo}' appears in both '{seen_repos[repo]}' and '{project_name}' routes (first match wins — remove one)")
+            else:
+                seen_repos[repo] = project_name
+
+    default = routing.get("default_project")
+    if default is not None and not (projects_dir / str(default)).is_dir():
+        errors.append(f"routing.yaml: default_project '{default}' does not exist at config/projects/{default}/")
     return errors
 
 

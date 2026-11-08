@@ -40,7 +40,7 @@ total_tests=$(count_tests "$OUTPUT_DIR")
 # --- Check for co-located qf_ prefixed tests in source repo ---
 qf_colocated_count=0
 if [ -n "${SOURCE_REPO_DIR:-}" ] && [ -d "${SOURCE_REPO_DIR}" ]; then
-    qf_colocated_count=$(find "${SOURCE_REPO_DIR}" \( -name "qf_*_test.go" -o -name "qf_test_*.py" \) 2>/dev/null | wc -l | tr -d ' ')
+    qf_colocated_count=$(find "${SOURCE_REPO_DIR}" \( -name "qf_*_test.go" -o -name "test_qf_*.py" \) 2>/dev/null | wc -l | tr -d ' ')
     if [ "$qf_colocated_count" -gt 0 ]; then
         echo "OK: found ${qf_colocated_count} co-located qf-prefixed test file(s) in source repo"
         total_tests=$((total_tests + qf_colocated_count))

@@ -5,7 +5,22 @@ description: Perform targeted LSP analysis on test repositories to extract fresh
 
 # Ticket Context Analyzer Agent
 
+**Ticket repository scope:** When `project_context.repositories` is present, it
+is the complete repository configuration for this ticket. Use it instead of
+reading shared `repositories.yaml`; pass `project_context.repositories_file`
+to tools requiring a YAML filename. Prefer each entry's `local_path` over its
+`local_path_env` variable. Search, fetch, clone and trace only entries in this
+resolved configuration; a removed slot is unavailable (do not fall back to
+shared config or another checkout). This applies to every example below.
+Without that context field, keep the existing repository lookup behavior.
+
+
 **Purpose:** Perform targeted LSP analysis on test repositories to extract fresh, contextual patterns for a specific Jira ticket.
+
+**Not part of `/generate-tests`.** Code generation collects the tests repo's
+fixtures, helpers and markers with `skills/test-generator/repo_context.py`
+(deterministic, one path); this agent stays a direct entry point for deeper
+pattern analysis.
 
 **Agent Type:** `general-purpose`
 
@@ -234,7 +249,7 @@ LSP Server Ready
 
 **Step 1.1: Read pattern guide**
 
-Use Read tool to load the reference pattern guide (`reference-examples/PATTERN_GUIDE.md`)
+Use Read tool to load the project's pattern library (`config/projects/{project}/patterns/tier{N}_patterns.yaml`)
 
 **Step 1.2: Extract key patterns for this tier**
 
@@ -356,7 +371,7 @@ Use LSP tool to search for symbols related to keyword:
 ```
 LSP operation: workspaceSymbol
 Query pattern: "{keyword}"
-Example: "Localnet"
+Example: "SecondaryNetwork"
 ```
 
 **Expected results:**
@@ -695,8 +710,8 @@ priority_patterns:
 
 Organize discovered patterns:
 
-- **network_helpers**: NAD creation, network configuration
-- **vm_factories**: Resource instance creation functions
+- **network_helpers**: network definition creation, network configuration
+- **resource_factories**: Resource instance creation functions
 - **console_helpers**: Console interaction, command execution
 - **wait_helpers**: Polling, wait conditions
 - **validation_helpers**: Assertion helpers
@@ -831,8 +846,8 @@ Human-readable summary:
 **Repository:** {from repositories.yaml}
 
 ## Keywords Extracted (5)
-- localnet (Primary)
-- Fedora (Secondary)
+- secondary-network (Primary)
+- console (Secondary)
 - ping (Tertiary)
 - same-node (Tertiary)
 - connectivity (Tertiary)
@@ -840,10 +855,10 @@ Human-readable summary:
 ## Patterns Discovered (15)
 
 ### Network Helpers (5)
-- NewLocalnetConfig - Create localnet network config
+- NewSecondaryNetworkConfig - Create secondary network config
 - PingFromConsole - Ping test from console
 - GetPrimaryIPByFamily - Get resource IP address
-- NewPasstNetDef - Create passt network def
+- NewNetworkDef - Create network definition
 - CreateBridge - Create bridge
 
 ### Resource Factories (3)
@@ -852,7 +867,7 @@ Human-readable summary:
 - ✅ WithNetwork - Add network config
 
 ### Console Helpers (4)
-- ✅ LoginToFedora - Login to Fedora VM
+- ✅ LoginToConsole - Log in to the resource console
 - ✅ RunCommand - Execute command in console
 - ✅ ExpectBatch - Batch command execution
 - ✅ SafeExpectBatch - Safe batch execution

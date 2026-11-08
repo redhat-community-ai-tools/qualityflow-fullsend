@@ -32,6 +32,12 @@ requirement:
       behavior_tested: "Password reset succeeds for valid email"
   coverage_gap:                 # present only for PARTIAL_COVERAGE
     - "Error handling for invalid email format not tested"
+  measured_coverage:            # optional, from pr-analyzer coverage_gaps
+    file: pkg/auth/reset.go
+    patch_coverage_pct: 6.5
+    uncovered_lines: [45, 46, 47, 52, 53]
+    precision: line             # line | file
+    executed_in_env: false      # optional, from CoverPort runtime data
 ```
 
 ## Output Format
@@ -43,8 +49,16 @@ scenario:
   test_scenarios:
     - description: Verify password reset email is sent for valid user
       type: positive
+      coverage_targets:          # present only when measured_coverage was supplied
+        - file: pkg/auth/reset.go
+          lines: "45-47"
+          symbol: HandlePasswordReset
     - description: Verify error for invalid email format
       type: negative
+      coverage_targets:
+        - file: pkg/auth/reset.go
+          lines: "52-53"
+          symbol: HandlePasswordReset
   suggested_tier: Tier 1 (Functional)
   suggested_priority: P0
 ```
@@ -59,6 +73,53 @@ Before generating scenarios, check `coverage_status` on the input requirement:
 | `PARTIAL_COVERAGE` | Generate scenarios ONLY for behaviors listed in `coverage_gap`. Skip behaviors already in `existing_coverage`. |
 | `NEW` or absent | Generate scenarios normally (full set, existing behavior). |
 
+### Measured coverage overrides the static verdict
+
+`coverage_status` alone is a **static** signal: regression-analyzer sets it by
+finding a test function that *references* a symbol. Referencing a symbol is not
+the same as exercising it. A file can have a large, healthy-looking test file
+next to it and still have 6% of its new lines executed.
+
+So when `measured_coverage` is present it wins:
+
+| Static `coverage_status` | Measured says | Effective status |
+|:-------------------------|:--------------|:-----------------|
+| `EXISTING_COVERAGE` | `uncovered_lines` is non-empty (or `patch_coverage_pct` < 100) | **Downgrade to `PARTIAL_COVERAGE`** — the existing test does not reach these lines |
+| `EXISTING_COVERAGE` | fully covered | `EXISTING_COVERAGE` (unchanged — genuine duplicate) |
+| `PARTIAL_COVERAGE` | any gap | `PARTIAL_COVERAGE`, with `coverage_gap` narrowed to the measured lines |
+| `NEW` | fully covered | `NEW` (still generate — measured coverage may come from an unrelated test) |
+| any | no `measured_coverage` | unchanged (backward compatible) |
+
+On a downgrade, replace the derived `coverage_gap` entries with the measured
+ones and record why, so a reviewer can see the disagreement:
+
+```yaml
+coverage_status: PARTIAL_COVERAGE
+coverage_status_source: measured   # static | measured
+coverage_override_reason: >-
+  Static analysis found TestResolveOverlays referencing ResolveOverlays, but
+  measured patch coverage for the added lines is 6.5% (129 lines unhit).
+```
+
+This is the one rule that turns "we have tests for that" into "we have tests
+that actually run that". Never silently suppress a scenario for a symbol whose
+changed lines measure as unhit.
+
+### Targeting the gap
+
+For each generated scenario, attach `coverage_targets[]` naming the exact
+`file` and `lines` the scenario is meant to make execute:
+
+- `precision: line` → cite the real line range, e.g. `"45-47"`.
+- `precision: file` → cite the file with `lines: null`. **Do not invent line
+  numbers.** A fabricated range is worse than an honest file reference,
+  because reviewers will check it.
+- One scenario should target one coherent branch or behavior, not "all 129
+  uncovered lines". Split by function and by branch.
+
+Scenario descriptions stay in the brief, user-facing form defined below — the
+line numbers live in `coverage_targets`, not in the description text.
+
 **EXISTING_COVERAGE output:**
 
 ```yaml
@@ -68,9 +129,9 @@ scenario:
   coverage_status: EXISTING_COVERAGE
   test_scenarios: []
   covered_by:
-    - test_function: TestCPUHotplug_Success
+    - test_function: TestCPUResize_Success
       test_file: pkg/compute/cpu_test.go
-      behavior_tested: "CPU hot-add succeeds for running VM"
+      behavior_tested: "In-place CPU resize succeeds for running workload"
 ```
 
 **PARTIAL_COVERAGE output:** Generate scenarios only for uncovered gaps. Include
@@ -203,6 +264,43 @@ If multiple similar scenarios, consolidate:
 |:--------------------|:---------------------|
 | Test add 1 item, Test add 2 items, Test add 4 items | Verify batch add with various counts |
 | Check status after add, Check events after add | Verify status and events after add operation |
+
+## Goals and scenarios are not duplicated
+
+Run this once over the **whole** Section III and the whole Testing Goals list
+(not per requirement), after every generation and every refinement — a
+refinement that adds scenarios is where duplicates usually appear.
+
+**Two scenarios are one scenario** when they share the setup and the action and
+one's expected result is the other's continuation or restatement. Merge them
+into a single scenario that states the full observable sequence:
+
+| Duplicates | Merged |
+|:-----------|:-------|
+| Verify workload startup waits until pull request finalization / Verify workload starts after pull finalization and cleanup | Verify workload start is blocked while a pull backup is in progress and succeeds once the backup request is deleted |
+| Verify request is rejected when feature gate is off / Verify rejection message names the feature gate | Verify request is rejected with a feature-gate error when the gate is off |
+
+Keep them separate only when they need different setup or conditions (gate on
+vs gate off, Linux vs Windows nodes) — the upstream granularity rule.
+
+**Mode variants** (push/pull, block/filesystem, one OS or protocol and
+another) are **one scenario** when the expected result is the same in every
+mode: name the modes in it ("... in push and pull modes"); the STD
+parametrizes it. Split only when the steps or the expected result differ by
+mode, and then each scenario says what differs. A pilot plan doubled 26
+behaviours into 50 rows this way, and its reviewers read every pair twice.
+
+**Goals** — one goal per distinct user outcome. A goal that applies to several
+modes names them once ("... in push and pull modes"); never one goal per mode.
+A goal is one sentence: `As a <role>, verify <observable outcome>`. Goals are
+outcomes, so there are fewer of them than scenarios: a goals list that maps
+one-to-one onto the scenarios restates Section III — merge it.
+
+**Vocabulary** — use the feature's own user-facing terms (the ones in the Jira
+user stories and the enhancement doc) and the same term every time. Do not
+invent paraphrases ("recoverable history", "mode-specific completion") for a
+term the reader already knows ("checkpoint", "backup completes when the request
+is deleted") — a reviewer has to decode every invented phrase.
 
 ## End-to-End Workflow Scenarios (Tier 2)
 

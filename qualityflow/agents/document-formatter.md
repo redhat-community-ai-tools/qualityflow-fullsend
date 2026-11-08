@@ -1,12 +1,12 @@
 ---
 name: document-formatter
 description: Format, validate, and sanitize the final STP document
-model: claude-opus-4-6
+model: inherit
 ---
 
 # Document Formatter Subagent
 
-**Model:** opus
+**Model:** project_context.model_policy (explicit user choice takes precedence)
 **Phase:** Post-Processing
 **Purpose:** Format, validate, and sanitize the final document
 
@@ -60,7 +60,7 @@ The skill will sanitize:
 
 - Customer names → `<customer>`, `Example Corp`
 - IP addresses → RFC 5737 ranges (192.0.2.x, 198.51.100.x, 203.0.113.x)
-- Hostnames → Generic names (worker-node-1, test-vm)
+- Hostnames → Generic names (worker-node-1, test-host)
 - Domains → example.com
 - Credentials → NEVER include
 - Vendor names → Generic categories (GPU Vendor, Storage Provider)
@@ -69,32 +69,13 @@ The skill will sanitize:
 
 Invoke the **output-validator** skill and apply it.
 
-The skill will validate:
-
-**Document Structure:**
-
-- [ ] Starts with: `# {project_context.stp_header}` (read from `project_context.stp_header` for the expected document header)
-- [ ] Feature title: `## **[Title] - Quality Engineering Plan**`
-- [ ] All required sections present
-
-**Table Row Counts:**
-
-- [ ] Metadata: 7 rows
-- [ ] Section I.1: 6 rows
-- [ ] Section I.2: 5 rows
-- [ ] Section II.4.A: 9 rows
-- [ ] Section II.4.B: 4 rows
-- [ ] Section II.5: 10 rows
-- [ ] Section II.7: 7 rows
-- [ ] Section III: Test scenarios present (no minimum - comprehensive coverage)
-
-**Content Validation:**
-
-- [ ] No YAML/JSON/code blocks
-- [ ] Test types are valid (Unit Tests, Tier 1, Tier 2 only)
-- [ ] Requirement summaries are unique per row
-- [ ] No generic/meta test scenarios
-- [ ] Horizontal rules between major sections
+The skill checks the STP against the template it was built from. It passes
+that template as `--template`, as described in its How to Run section, so a
+team's own template sets the sections, labels and per-item fields. On top of
+that, every team gets QF's contract: the `# {project_context.stp_header}`
+header, the Section III entry format with inline tier tags, unique `TS-{NN}`
+ids and requirement summaries, no code blocks, no generic scenarios, and no
+status prose where a `[Name/Date]` placeholder belongs.
 
 ### Step 4: Invoke table-generator Skill
 
@@ -142,7 +123,7 @@ validation_results:
   structure_valid: true
   errors: []
   warnings:
-    - "Optional: Consider adding more detail to Section II.7"
+    - "Optional: Consider adding more detail to Section II.5 Risks"
 
 sanitization_summary:
   ips_replaced: <count>
@@ -160,8 +141,8 @@ file_written: true
 
 1. Document Header
 2. Feature Title
-3. Metadata & Tracking
-4. Related GitHub Pull Requests
+3. Metadata & Tracking (bullet list — no Related GitHub PRs table follows it)
+4. Feature Overview
 5. Section I.1 - Requirement Review Checklist
 6. Section I.2 - Known Limitations
 7. Section I.3 - Technology and Design Review
@@ -171,8 +152,9 @@ file_written: true
 11. Section II.3.1 - Testing Tools (bullet list, optional)
 12. Section II.4 - Entry Criteria
 13. Section II.5 - Risks (checkbox list)
-14. Section III - Test Scenarios & Traceability (bullet list)
-15. Section IV - Sign-off
+14. Section III.1 - Requirements-to-Tests Mapping (bullet list)
+15. Section III.2 - Source Constants (table, optional)
+16. Section IV - Sign-off
 
 ### Prohibited Content
 

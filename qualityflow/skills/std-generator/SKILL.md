@@ -12,8 +12,8 @@ Transforms **all scenarios** from a Software Test Plan (STP) into **ONE comprehe
 
 - Shared metadata and common preconditions
 - **code_generation_config** (NEW in v2.1): imports, context init, timeout mappings
-- **variables section per scenario** (NEW in v2.1): closure-scoped variable declarations
-- **test_structure section per scenario** (NEW in v2.1): decorator placement, SIG() wrapper
+- **variables section per scenario** (NEW in v2.1, Ginkgo tiers): closure-scoped variable declarations
+- **test_structure section per scenario** (NEW in v2.1, Ginkgo tiers): decorator placement, SIG() wrapper
 - Detailed specifications for each scenario
 - **Pattern metadata** (patterns, helpers, decorators, code templates)
 - **Fixed code templates** (v2.1): no variable shadowing, ExpectWithOffset, auto-generated cleanups
@@ -29,34 +29,27 @@ Transforms **all scenarios** from a Software Test Plan (STP) into **ONE comprehe
 
 ## Repo Rules Integration
 
-When `project_context.repo_rules` is available, apply these rules:
+`project_context.repo_rules` carries the target repository's own rules, fetched at
+run time from the files the project lists under `repo_files` in `repositories.yaml`
+(project-resolver Step 2). Apply what each fetched file states; where it differs
+from a default in this skill, the file wins:
 
-**From repo_rules.std_format (SOFTWARE_TEST_DESCRIPTION.md):**
+- **`repo_rules.std_format`** (the repo's STD guide): PSE wording, `[NEGATIVE]`,
+  `Parametrize:` and `Markers:` syntax, shared vs test-specific preconditions,
+  `__test__ = False` placement.
+- **`repo_rules.agents_rules`** (the repo's AGENTS.md or contributing rules): markers
+  the suite adds by itself and so must not be emitted, forbidden constructs, fixture
+  naming, how dependent tests are declared.
+- **`repo_rules.testing_tiers`** (the project's tier definitions): use them, with
+  `project_context.scenario_tiers`, to classify scenarios.
 
-- PSE docstring format: `Preconditions:`, `Steps:`, `Expected:` (exact section names)
-- `[NEGATIVE]` indicator for failure scenarios
-- `Parametrize:` section with inline `[Markers: ...]` syntax
-- Shared vs test-specific preconditions rules
-- Assertion wording patterns (maps to assertions)
-- `__test__ = False` placement: class-level for grouped tests, after function for standalone
-
-**From repo_rules.agents_rules (AGENTS.md):**
-
-- Test Design Workflow: STP → STD → Implementation (mandatory)
-- `tier2` is implicit — do NOT emit `@pytest.mark.tier2` in STD metadata
-- Team markers are implicit — do NOT emit `@pytest.mark.network`, etc.
-- `pytest.skip/skipif` are forbidden
-- STD stubs must have STP link in module docstring
-- Name resources by function ("client resource"), not generic labels ("resource-A")
-- `@pytest.mark.incremental` for dependent tests, not `pytest-dependency`
-
-**From repo_rules.testing_tiers (testing-tiers.md):**
-
-- Tier definitions for classification validation:
-  - Tier 1: operator/infrastructure tests, single feature verification
-  - Tier 2: customer use case tests, complete user workflows
-  - Tier 3: complex/hardware/platform-specific/time-consuming tests
-- Use these definitions when classifying scenarios in the STD
+Apply only rules a fetched file states. With none fetched, this skill's defaults
+apply, and no other team's conventions are assumed. Two things stay fixed whatever
+a guide's own examples show, because validate_std.py checks them: the PSE section
+names `Preconditions:`, `Steps:`, `Expected:`, and the reference keyword `STP:`, or
+`Jira:` when there is no STP (never `STP Reference:`). The STP link, or the RFE/Jira
+link when there is no STP, goes in the module, class or test docstring;
+stub-generator writes it in the module docstring and in every test.
 
 These rules affect the `classification`, `test_structure`, and PSE docstring generation
 within each scenario in the STD YAML.
@@ -70,14 +63,27 @@ within each scenario in the STD YAML.
     - `priority`: Priority (e.g., "P0", "P1", "P2")
     - `description`: Scenario description text
     - `requirement_id`: Requirement ID (e.g., "PROJ-59657")
+    - `requirement_ids` (optional): Full requirement reference list for this
+      scenario (Jira keys and/or fine-grained `REQ-{JIRA_KEY}-{NN}` ids) —
+      copy verbatim into the STD scenario's `requirement_ids`
+    - `stp_scenario_id`: The STP scenario's own heading id (e.g., "TS-01") —
+      copy verbatim into the STD scenario's `stp_scenario_id`
+    - `external_id`, `polarion_id`, `jira_url`, `source_pse`,
+      `source_missing`, `step_results`, `review_note` (optional, scenario-list
+      input only): the source system's id, the Polarion test case id, the
+      scenario's own Jira link, which PSE sections the source had, each step's
+      own expected result, and the team's correction — copy each verbatim into
+      the STD scenario (std-orchestrator Step 1B says how they shape the PSE)
 - `stp_context`: Context from the STP document
-  - `jira_issue`: Jira ticket ID and metadata
+  - `jira_issue` / `jira_summary`: Jira ticket ID and summary — from a
+    scenario list (std-orchestrator Step 1B), its `context.jira_id` / `context.title`
   - `feature_description`: Feature overview (from Feature Overview section)
   - `related_prs`: List of GitHub PRs (from Metadata)
   - `api_endpoints`: API endpoints (from Section I.3 API Extensions, if applicable)
   - `known_limitations`: Known limitations (from Section I.2)
   - `test_environment`: Test environment requirements (from Section II.3)
-- `source_constants` (optional): Array of literal constants extracted from source code by the STP Builder
+- `source_constants` (optional): Array of literal constants, from the STP's Source Constants
+  section and from the collected Jira/PR data (std-orchestrator Steps 1.5 and 1.6)
   - Each constant has:
     - `name`: Constant identifier (e.g., "SENTINEL", "SCRIPT_PATH")
     - `value`: Exact value from source code (verbatim, never paraphrased)
@@ -108,19 +114,22 @@ within each scenario in the STD YAML.
 **Structure:**
 
 ```yaml
----
 # Document Metadata (shared)
 document_metadata: {...}
+code_generation_config: {...}
 common_preconditions: {...}
 
-# Scenarios Array (one entry per STP scenario)
+# Scenarios Array (one entry per STP scenario, fields in Section 3)
 scenarios:
-  - scenario_001: {...}
-  - scenario_002: {...}
-  - scenario_003: {...}
-  ...
----
+  - scenario_id: "1"
+    test_id: "TS-{JIRA_ID}-001"
+  - scenario_id: "2"
+    test_id: "TS-{JIRA_ID}-002"
 ```
+
+The file is ONE YAML document: never write `---` separators. `yaml.safe_load`
+rejects a multi-document stream, so validate_std.py exits 2 without checking
+anything.
 
 ---
 
@@ -128,8 +137,8 @@ scenarios:
 
 When generating an STD, read templates from `{project_context.config_dir}/templates/std/`
 if available (provides project-specific values for infrastructure, operators, tools, etc.).
-Fall back to the generic skeleton templates in this skill's `templates/` directory when
-`config_dir` is null (auto-discovery mode).
+Fall back to the generic skeleton in this skill's `templates/std_template_comprehensive.yaml`
+when `config_dir` is null (auto-discovery mode).
 
 ---
 
@@ -145,18 +154,24 @@ Fall back to the generic skeleton templates in this skill's `templates/` directo
 document_metadata:
   std_version: "2.1-enhanced"
   generated_date: "YYYY-MM-DD"
-  jira_issue: "{JIRA_ID}"
-  jira_summary: "{Jira issue summary}"
+  jira_issue: "{JIRA_ID}"                 # scenario list: context.jira_id
+  jira_summary: "{Jira issue summary}"    # scenario list: context.title
   source_bugs: ["{PROJ-XXXXX}", ...]  # If applicable
   stp_reference:
     file: "outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md"
     url: "{MERGED_STP_URL}"  # Set by std-orchestrator Step 1.7; null otherwise
     version: "v1"
     sections_covered: "Section III - Requirements-to-Tests Mapping"
+  # No STP (scenario-list input): stp_reference is null and this Jira link,
+  # from the list's context, is the stubs' reference instead.
+  jira_url: "{JIRA_URL}"
+  scenario_list:                                  # scenario-list input only
+    file: "outputs/{JIRA_ID}/input/{JIRA_ID}_scenarios.yaml"
+    source: "{the list's source, e.g. polarion}"
 
   # related_prs is internal metadata for code generation context.
   # It MUST NOT be propagated to Phase 1 stub module docstrings.
-  # Stub docstrings contain only STP Reference and Jira ID.
+  # Stub module docstrings carry only the `STP:` and `Jira:` lines.
   related_prs:
     - repo: "{org/repo}"
       pr_number: {number}
@@ -169,13 +184,18 @@ document_metadata:
   participating_sigs: ["{sig-1}", "{sig-2}"]
 
   total_scenarios: {count}
-  tier_counts:                    # tier mode only (empty in auto mode)
+  # Count by the label the scenarios carry, and omit the other set entirely:
+  # tier_counts when they carry `tier` (tier mode, or auto mode with
+  # scenario_tiers), the per-type counts when they carry `test_type`
+  # (auto mode without scenario_tiers).
+  tier_counts:
     "Tier 1": {count}
     "Tier 2": {count}
-    # additional tiers as defined by project's tier*.yaml configs
-  unit_count: {count}             # auto mode only (0 in tier mode)
-  functional_count: {count}       # auto mode only (0 in tier mode)
-  e2e_count: {count}              # auto mode only (0 in tier mode)
+    # one key per tier the scenarios use (tier*.yaml configs, or scenario_tiers)
+  unit_count: {count}
+  functional_count: {count}
+  integration_count: {count}
+  e2e_count: {count}
   p0_count: {count}
   p1_count: {count}
   existing_coverage_count: {count}  # scenarios with EXISTING_COVERAGE status
@@ -186,7 +206,7 @@ document_metadata:
 **Derivation:**
 
 - Extract from STP metadata table (Section I)
-- Count scenarios by tier/type and priority
+- Count scenarios by tier or test_type (whichever label they carry) and by priority
 - Count scenarios by coverage_status
 - List all related PRs from STP Section II.4
 
@@ -218,7 +238,7 @@ code_generation_config:
 
   # Co-located test placement
   target_test_directory: "{resolved_directory}"     # e.g., "internal/cli"
-  filename_prefix: "qf_"                            # prefix for generated test files
+  filename_prefix: "qf_"                            # prefix for generated test files ("test_qf_" for Python)
 
   imports:
     standard: "{test_strategy.imports.standard}"
@@ -299,7 +319,9 @@ code_generation_config:
   `target_test_directory_rules` in config
   - If `config_dir` has `repositories.yaml` with a `test_directory` field, use that
   - Never set to `null` — use `owning_sig` default as last resort
-- **filename_prefix**: Always `"qf_"` (from `_defaults.yaml` `test_file_prefix`)
+- **filename_prefix**: `_defaults.yaml` `test_file_prefix` for the STD's
+  language: `"qf_"` for Go, `"test_qf_"` for Python (pytest's default
+  `python_files`, `test_*.py *_test.py`, skips `qf_{feature}.py`)
 - All other fields are read directly from the project's `code_generation_config.yaml`
 
 ---
@@ -362,19 +384,41 @@ common_preconditions:
 scenarios:
   - scenario_id: "{NUM}"
     test_id: "TS-{JIRA_ID}-{NUM:03d}"
-    tier: "{from tier-classifier}"       # tier mode — matches project's tier*.yaml configs
-    test_type: "{unit|functional|e2e}"  # auto mode (use instead of tier)
+    tier: "{from tier-classifier}"       # tier mode, or auto mode with project_context.scenario_tiers
+    test_type: "{unit|functional|integration|e2e}"  # auto mode without scenario_tiers (use instead of tier)
+    marker: "{scenario_tiers[].marker}" # optional — e.g. "tier3"; stub/test generators add it
     priority: "{P0|P1|P2}"
     priority_comment: "P{n} — {one-line rationale from STP}"
     mvp: {true|false}
-    requirement_id: "{REQUIREMENT_ID}"
+    requirement_id: "{REQUIREMENT_ID}"          # bare Jira key — unchanged, backward compatible
+    requirement_ids: ["{REQ_OR_JIRA_ID}", ...]   # NEW in v2.1: full requirement reference list, copied verbatim from the STP scenario
+    stp_scenario_id: "TS-{NN}"                   # NEW in v2.1: the STP scenario this implements, copied from the STP heading
+    external_id: "{SOURCE_ID}"                   # optional — scenario-list input, copied verbatim
+    polarion_id: "{POLARION_ID}"                 # optional — the stub lists it under Markers: as polarion("{POLARION_ID}")
+    source_pse: "{complete|partial|missing}"     # optional — scenario-list input; not complete = the stub flags proposed PSE
+    source_missing: ["preconditions"]            # optional — the sections the source lacked; the stub's Source: line names them
+    step_results: [{step: "...", expected: "..."}]  # optional — each step's own expected result -> that step's validation
+    open_questions: ["<TBD: ...> — what is needed"]  # optional — literals no source gave (Source Constants Rule)
+    review_note: "{TEAM_CORRECTION}"             # optional — the team's correction to the source's steps; the stub says so
+    jira_url: "{REQUIREMENT_JIRA_URL}"           # optional — this scenario's tests link it instead of document_metadata.jira_url
 
     # ===== COVERAGE STATUS (from STP deduplication) =====
     coverage_status: "{NEW|PARTIAL_COVERAGE|EXISTING_COVERAGE}"  # optional, defaults to NEW
+    coverage_status_source: "{static|measured}"  # optional; `measured` means a
+                                          # coverage tool, not static analysis,
+                                          # decided this — see scenario-builder
     covered_by:                           # present only for EXISTING_COVERAGE or PARTIAL_COVERAGE
       - test_function: "{existing test function name}"
         test_file: "{path to existing test file}"
         behavior_tested: "{brief description}"
+
+    # ===== COVERAGE TARGETS (from scenario-builder, PR mode only) =====
+    # The exact code this scenario must make execute. Copy through verbatim
+    # from the STP scenario; do not synthesize. Omit when absent.
+    coverage_targets:
+      - file: "{path/to/source.go}"
+        lines: "{45-47}"                  # null when precision is file-level
+        symbol: "{EnclosingFunction}"
 
     # For EXISTING_COVERAGE scenarios: only include scenario_id, test_id,
     # requirement_id, coverage_status, and covered_by. Skip all sections
@@ -394,6 +438,9 @@ scenarios:
       decorators:
         - "{decorator_1}"
         - "{decorator_2}"
+
+    # ===== GINKGO TIERS ONLY: variables, test_structure, code_structure =====
+    # (see "Ginkgo-only sections" under PATTERN ENHANCEMENT)
 
     # ===== VARIABLE DECLARATIONS (AUTO-GENERATED in v2.1) =====
     variables:
@@ -533,7 +580,7 @@ scenarios:
 - `acceptance_criteria`: Extract from scenario description and STP acceptance criteria
 - `classification`: Infer from tier and scenario complexity
 - `specific_preconditions`: Add scenario-specific requirements (e.g., external router for networking tests)
-- `test_data`: Generate realistic YAML for VMs, pods, networks based on scenario
+- `test_data`: Generate realistic YAML for pods, services, networks based on scenario
   - **CRITICAL — Source Constants Rule:** When `source_constants` are provided in the input,
     use them **verbatim** for any matching test_data fields. Specifically:
     - Sentinel/marker strings: use the exact `value` from source_constants, never infer or paraphrase
@@ -541,10 +588,27 @@ scenarios:
     - Template content: if a source constant provides template text, embed it as-is
     - If a test scenario references a concept that matches a source constant by name (e.g., "sentinel",
       "marker", "script path"), the STD MUST use the source_constants value — not an LLM-inferred value
+    - The same applies to `test_steps` commands and `assertions`: a step that runs the CLI names its
+      real flags, an assertion on a field compares it with the source_constants value
+    - **Never invent a literal.** A flag, config key, field name, endpoint, identifier format,
+      threshold or error message that is in neither source_constants nor the STP is written as
+      `<TBD: what is needed>` and listed in the scenario's `open_questions`, never filled with a
+      plausible value. An invented value fails against the shipped code; a TBD is visible
+    - A constant with `conflict: true` gets its own assertion only when the scenario tests that
+      disagreement; otherwise use the non-conflicting (code) value
     - If no source_constants are provided, derive test_data from scenario descriptions as before (best-effort)
 - `test_steps`: Expand scenario into 5-10 detailed steps (setup → execute → cleanup)
 - `assertions`: Extract validation points from scenario description (2-5 per scenario)
 - `dependencies`: List K8s resources, tools, and RBAC specific to this scenario
+- `requirement_ids`: Copy the STP scenario's requirement references verbatim into
+  `requirement_ids`; do not re-derive or collapse them. This includes any
+  fine-grained `REQ-{JIRA_KEY}-{NN}` ids and/or Jira keys the STP scenario cites.
+  If the STP scenario has no references beyond its bare `requirement_id`, set
+  `requirement_ids` to a single-element list containing that same value.
+- `stp_scenario_id`: 1:1 mapping, in STP order — copy the STP scenario's heading
+  id (e.g., `"TS-01"`) verbatim from the STP. If a single STP scenario is split
+  into multiple STD scenarios, every child STD scenario carries the same
+  `stp_scenario_id`.
 
 ---
 
@@ -567,12 +631,18 @@ Within a single scenario, no two `test_execution` steps may describe the same ac
 If two steps share the same verb+object, merge them. Setup steps that appear in both
 `setup` and `test_execution` must appear only in `setup`.
 
-### Rule Q.3 — Shared Preconditions Repeat at Test Level
+### Rule Q.3 — Shared Resources Repeat at Test Level
 
-When a scenario's `test_steps` directly uses a resource from `common_preconditions`,
-the scenario's `specific_preconditions` must re-state that dependency explicitly.
-The test must be self-contained — a reader should not need to cross-reference
-`common_preconditions` to understand what the test requires.
+When a scenario's `test_steps` directly use a test resource that other scenarios
+share (e.g., a resource their setup creates), the scenario's `specific_preconditions`
+must re-state it, so the test is self-contained (stub-generator's Shared Resource
+Repetition Rule: a shared resource a test uses directly appears in both the shared
+and the test-level preconditions).
+
+Never re-state `common_preconditions` (platform and product versions, operators,
+cluster topology, RBAC): those are test environment requirements, and
+`specific_preconditions` become stub Preconditions, which never list them
+(stub-generator, PSE Boundary Rules).
 
 ### Rule Q.4 — Terminology Consistency
 
@@ -580,7 +650,7 @@ A term introduced in `test_objective` must appear verbatim in `test_steps`,
 `assertions`, and `specific_preconditions`. Never substitute synonyms:
 
 - If objective says "secondary interface", steps say "secondary interface" (not "additional NIC")
-- If objective says "live migration", steps say "live migration" (not "virt migration")
+- If objective says "rolling upgrade", steps say "rolling upgrade" (not "rolling update")
 
 Applies across: test_objective ↔ test_steps ↔ assertions ↔ specific_preconditions.
 
@@ -592,7 +662,7 @@ Read, Count, Execute, Send, Receive, Start, Stop, Restart, Configure, Apply, Rem
 
 - BAD: "The resource should be migrated" (passive)
 - BAD: "Handle the migration" (vague)
-- GOOD: "Execute live migration of resource to target node"
+- GOOD: "Execute migration of resource to target node"
 
 ### Rule Q.6 — Priority Traceability
 
@@ -605,9 +675,15 @@ This links the scenario back to its STD traceability and gives reviewers context
 ## PATTERN ENHANCEMENT (AUTO-GENERATION)
 
 **Mode gate:** Pattern enhancement applies in **tier mode only** (`test_strategy: "tier"`).
-In **auto mode**, skip this entire section — auto-detected projects do not have pattern
-libraries, decorators, or project-specific helpers. Auto-mode scenarios use a simpler
-structure: `test_objective`, `test_steps`, `assertions`, and reference `code_generation_config`.
+In **auto mode**, with or without `scenario_tiers`, skip this entire section —
+auto-detected projects do not have pattern libraries, decorators, or project-specific
+helpers. Auto-mode scenarios use a simpler structure: `test_objective`, `test_steps`,
+`assertions`, and reference `code_generation_config`.
+
+**Ginkgo-only sections:** `variables`, `test_structure`, `code_structure`, and the
+v2.1 code-template transformations (`supplemental.md`) are Ginkgo constructs. Add
+them only to tier-mode scenarios whose tier config has `framework: "ginkgo-v2"` —
+never in auto mode, and never for another framework.
 
 **CRITICAL (tier mode only):** All scenarios MUST include pattern metadata for production-ready STD.
 
@@ -621,35 +697,33 @@ For each scenario, analyze the description and automatically add pattern metadat
 
 **Requires:** `project_context.config_dir` is not null.
 
-Apply these rules to match scenarios to patterns from `{project_context.config_dir}/patterns/` directory:
+Apply these rules to match scenarios to patterns from the project's pattern
+library at `{project_context.config_dir}/patterns/tier{N}_patterns.yaml` (one
+file per tier — the project config is the source of truth for pattern ids,
+keywords, and templates; never invent pattern ids not defined there):
 
 #### 1. Keywords → Primary Pattern
 
-Analyze the scenario description for these keywords:
+Each pattern in the library declares a `keywords` list. Match the scenario
+description against these keyword lists and set `patterns.primary` to the
+best-matching `<pattern-id from the project's patterns/tier{N}_patterns.yaml>`.
 
-- Contains **"connectivity"**, **"ping"**, **"reach"** → `network-connectivity-001`
-- Contains **"migration"**, **"migrate"** → `migration-001`
-- Contains **"hotplug"**, **"attach"** → `network-hotplug-001`
-- Contains **"lifecycle"**, **"create"**, **"delete"** → `vm-lifecycle-001`
-- Contains **"console"**, **"login"**, **"SSH"** → `console-001`
-- Contains **"snapshot"**, **"restore"** → `snapshot-001`
-- Contains **"clone"**, **"copy"** → `clone-001`
+Generic example: a library entry `resource-lifecycle-001` with
+`keywords: [lifecycle, create, delete]` matches a scenario described as
+"Verify resource creation and deletion".
 
 #### 2. Resources → Setup Patterns
 
 Identify required resources and add setup patterns:
 
-- Resource type mentions → Add corresponding `factory-*` pattern from pattern library
-- **Any resource creation** → Also add appropriate `wait-*` pattern (wait for resource ready)
+- Resource type mentions → Add the corresponding creation/factory pattern from the library
+- **Any resource creation** → Also add the library's wait-for-ready pattern (if defined)
 
 #### 3. Actions → Execution Patterns
 
-Identify test actions and add execution patterns:
-
-- Action: **"ping"**, **"connectivity test"** → Add `network-ping-001`
-- Action: **"migrate"** → Add `migration-execute-001`
-- Action: **"console"**, **"login"** → Add `console-001`
-- Action: **"hotplug"**, **"attach"** → Add `network-hotplug-execute-001`
+Each pattern declares an `actions` list. Match the scenario's test actions
+against these lists and add the corresponding execution pattern ids from the
+library as `patterns.secondary` entries.
 
 #### 4. Infer Helpers from Patterns
 
@@ -665,21 +739,18 @@ The project config defines available helper functions, their signatures, and ret
 
 #### 5. Add Decorators
 
-Add test decorators based on tier and domain:
+Add test decorators based on tier and domain, using the decorator names
+defined in the project config (`{project_context.config_dir}/code_generation_config.yaml`
+and the pattern library) — never hardcode decorator names from another project:
 
-**Tier-based:**
+**Tier-based:** map the scenario's tier to the project's tier decorator
+(e.g., Tier 1 → `decorators.Tier1`).
 
-- Tier 1 → `decorators.Tier1`
-- Tier 2 → `decorators.Tier2`
+**Domain-based:** if the project config defines domain/SIG decorators, match
+the scenario's domain (from its description and `owning_sig`) to the
+corresponding decorator from the config.
 
-**Domain-based (from scenario description):**
-
-- Network-related → `decorators.SigNetwork`
-- Migration-related → `decorators.SigCompute`
-- Storage-related → `decorators.SigStorage`
-- Compute-related → `decorators.SigCompute`
-
-**Always add:**
+**Always add (Ginkgo tiers):**
 
 - `Ordered` (for proper test execution order)
 - `decorators.OncePerOrderedCleanup` (for cleanup after ordered tests)
@@ -688,7 +759,7 @@ Add test decorators based on tier and domain:
 
 For each matched pattern:
 
-1. **Read pattern definition** from `{project_context.config_dir}/patterns/tier1_patterns.yaml`
+1. **Read pattern definition** from `{project_context.config_dir}/patterns/tier{N}_patterns.yaml` (the file for the scenario's tier)
 2. **Extract the `template` field** for that pattern
 3. **Add as `code_template`** to the corresponding test step
 4. **Add `pattern_id`** to link step to pattern
@@ -710,7 +781,7 @@ test_steps:
 
 #### 7. Generate Code Structure
 
-For each scenario, generate a Ginkgo test structure hint:
+For each Ginkgo-tier scenario, generate a Ginkgo test structure hint:
 
 ```go
 Context("{scenario_description}", Ordered) {
@@ -733,21 +804,12 @@ Replace placeholders:
 
 ### Pattern Library Reference
 
-**Location**: `{project_context.config_dir}/patterns/tier1_patterns.yaml`
+**Location**: `{project_context.config_dir}/patterns/tier{N}_patterns.yaml`
+(one file per tier: `tier1_patterns.yaml`, `tier2_patterns.yaml`, ...)
 
-**Available Patterns:**
-
-- `network-connectivity-001` - Network connectivity tests
-- `factory-001` - Resource creation with factory
-- `wait-002` - Wait for resource ready
-- `console-001` - Console login
-- `migration-001` - Live migration
-- `network-def-001` - Network definition creation
-- `factory-pod-001` - Pod creation
-- `table-001` - Table-driven tests
-- `network-hotplug-001` - Network interface hotplug
-- `snapshot-001` - Snapshot operations
-- `clone-001` - Cloning operations
+**Available Patterns:** defined entirely by the project's pattern library —
+read the files, do not assume a fixed catalog. Generic example entry:
+`resource-lifecycle-001` (resource create/delete tests).
 
 Each pattern provides:
 
@@ -759,100 +821,17 @@ Each pattern provides:
 
 ---
 
-### Pattern Enhancement Validation
+### Chunked Generation
 
-Before generating the STD file, validate pattern metadata:
+When the orchestrator calls this skill with a batch (not all scenarios):
 
-- [ ] All scenarios have `patterns.primary` field
-- [ ] All scenarios have `patterns.helpers_required` array
-- [ ] All scenarios have `patterns.decorators` array
-- [ ] All scenarios have `code_structure` field
-- [ ] All test steps have `pattern_id` where applicable
-- [ ] All test steps have `code_template` where applicable
-- [ ] Pattern IDs reference actual patterns in `{project_context.config_dir}/patterns/`
-
----
-
-## LLM Prompt for Comprehensive STD Generation
-
-**System Prompt:**
-
-```
-You are an expert QE engineer generating a comprehensive Software Test Description (STD) from a Software Test Plan (STP).
-
-Your task:
-1. Read ALL scenarios from the STP Section III (Requirements-to-Tests Mapping table)
-2. Extract shared metadata from STP Sections I and II
-3. Generate ONE comprehensive STD YAML file with:
-   - document_metadata (shared across all scenarios)
-   - common_preconditions (shared infrastructure/environment)
-   - scenarios array (detailed spec for each scenario)
-
-Guidelines:
-- Generate ONE file for ALL scenarios (not one file per scenario)
-- Extract common preconditions to avoid duplication
-- Be specific and detailed in scenario specifications
-- Use realistic patterns from the project's pattern library
-- Include complete YAML definitions for test resources
-- Link scenarios to requirements (Jira, GitHub PRs)
-- Prioritize assertions (P0 = critical, P1 = nice to have)
-
-CRITICAL - Pattern Enhancement (AUTO-GENERATED):
-- For EACH scenario, analyze the description and automatically add pattern metadata
-- Apply pattern matching rules (keywords → patterns, resources → setup patterns, etc.)
-- Infer helper libraries from matched patterns
-- Add decorators based on tier and domain
-- Generate code templates from pattern library (`{project_context.config_dir}/patterns/tier1_patterns.yaml`)
-- Add code_structure hint for each scenario
-- Add pattern_id and code_template to each test step
-- This is NOT optional - ALL scenarios MUST have pattern metadata
-
-Output only valid YAML. Do not include explanations outside the YAML structure.
-
-CHUNKED GENERATION (when called with a batch, not all scenarios):
-- The orchestrator may call you multiple times with batches of ~15 scenarios
-- First call: generate document_metadata + common_preconditions + code_generation_config + the batch of scenarios
-- Subsequent calls: generate ONLY the new batch of scenarios (YAML array items indented under `scenarios:`)
-- Do NOT regenerate metadata or common_preconditions on subsequent calls
-- Each batch output must be valid YAML fragments that can be appended to the scenarios array
-```
-
-**User Prompt Template:**
-
-```
-Generate a comprehensive Software Test Description (STD) YAML file for ALL scenarios in the following STP:
-
-STP FILE: {stp_file_path}
-
-DOCUMENT METADATA:
-  Jira Issue: {jira_id} - {jira_summary}
-  Source Bugs: {source_bugs}
-  Related PRs: {related_prs}
-  Owning SIG: {owning_sig}
-  Total Scenarios: {total_scenarios}
-
-STP CONTEXT:
-  Feature Description: {feature_description}
-  Non-Goals: {non_goals}
-  Test Environment: {test_environment}
-  Fix Versions: {fix_versions}
-
-SOURCE CONSTANTS (from STP Section III.2, if present):
-{source_constants_array}
-NOTE: These values were extracted from actual source code by the STP Builder.
-Use them VERBATIM in test_data fields. Do not infer, paraphrase, or modify.
-
-ALL SCENARIOS (from STP Section III.1):
-{scenarios_array}
-
-Generate ONE comprehensive STD YAML file with:
-1. document_metadata (shared metadata for entire test suite)
-2. common_preconditions (shared infrastructure/environment requirements)
-3. scenarios (array with detailed spec for each scenario)
-
-Output filename: {JIRA_ID}_test_description.yaml
-Output only valid YAML.
-```
+- First call: generate document_metadata + common_preconditions +
+  code_generation_config + the batch of scenarios
+- Subsequent calls: generate ONLY the new batch of scenarios (YAML array
+  items indented under `scenarios:`) — do NOT regenerate metadata or
+  common_preconditions
+- Each batch output must be a valid YAML fragment appendable to the
+  scenarios array
 
 ---
 
@@ -862,34 +841,40 @@ Before outputting the STD YAML, validate ALL of the following:
 
 **Base STD Structure:**
 
-- [ ] Valid YAML syntax (parse with YAML parser)
+- [ ] Valid YAML: ONE document with no `---` separators, parsed by `yaml.safe_load`
 - [ ] document_metadata section complete
 - [ ] document_metadata.std_version is "2.1-enhanced"
 - [ ] common_preconditions section complete
 - [ ] scenarios array has entries for ALL STP scenarios
 - [ ] Each scenario has required fields:
-  - [ ] scenario_id, test_id, tier, priority
+  - [ ] scenario_id, test_id, priority, and tier or test_type (see Section 3)
+  - [ ] requirement_ids (copied verbatim from the STP scenario's requirement references)
+  - [ ] stp_scenario_id (copied verbatim from the STP scenario heading)
   - [ ] test_objective (title, what, why, acceptance_criteria)
   - [ ] test_steps (setup, test_execution, cleanup)
   - [ ] assertions (at least 1 per scenario)
 - [ ] No "TODO" or placeholder values
 - [ ] All scenario test_ids follow format: TS-{JIRA_ID}-{NUM:03d}
 
-**Pattern Enhancement:**
+**Pattern Enhancement (tier mode only):**
 
 - [ ] ALL scenarios have `patterns` section with `primary` field
 - [ ] ALL scenarios have `patterns.helpers_required` array
 - [ ] ALL scenarios have `patterns.decorators` array
-- [ ] ALL scenarios have `code_structure` field
 - [ ] ALL test steps have `pattern_id` where applicable
 - [ ] ALL test steps have `code_template` where applicable
-- [ ] Pattern IDs match patterns in `{project_context.config_dir}/patterns/tier1_patterns.yaml`
+- [ ] Pattern IDs match patterns in `{project_context.config_dir}/patterns/tier{N}_patterns.yaml`
 
 **v2.1 Enhancement:**
 
 - [ ] `code_generation_config` section exists at document level
 - [ ] `code_generation_config.std_version` is "2.1-enhanced"
-- [ ] `code_generation_config.package_name` is inferred from owning_sig
+- [ ] `code_generation_config.package_name` is inferred from owning_sig (tier mode)
+
+**Ginkgo tiers only** (tier mode, `framework: "ginkgo-v2"`; skip in auto mode and for
+any other framework):
+
+- [ ] ALL scenarios have `code_structure` field
 - [ ] ALL scenarios have `variables` section
 - [ ] ALL scenarios have `test_structure` section
 - [ ] ALL `variables.closure_scope` includes at minimum: ctx, namespace, err
@@ -902,7 +887,7 @@ Before outputting the STD YAML, validate ALL of the following:
 
 - [ ] No test_execution step is a pure read/query (Q.1)
 - [ ] No duplicate verb+object in test_execution within a scenario (Q.2)
-- [ ] Scenarios using common_preconditions resources re-state them in specific_preconditions (Q.3)
+- [ ] Scenarios re-state the shared test resources they use in specific_preconditions, and never a common_preconditions entry (Q.3)
 - [ ] Terms used in test_objective appear verbatim in steps/assertions (Q.4)
 - [ ] All action fields use approved active verbs (Q.5)
 - [ ] All scenarios have priority_comment field (Q.6)
@@ -912,6 +897,8 @@ Before outputting the STD YAML, validate ALL of the following:
 - [ ] ALL sentinel/marker strings in test_data match source_constants values exactly
 - [ ] ALL file paths in test_data match source_constants paths exactly
 - [ ] No test_data field contains an LLM-inferred value when a matching source_constant exists
+- [ ] test_steps commands and assertions use source_constants values (flags, fields, URNs, thresholds) verbatim
+- [ ] Every literal not backed by source_constants or the STP is a `<TBD: …>` listed in `open_questions`
 - [ ] Source constants are referenced with their original name in a `source_constant_ref` field
 
 **If ANY validation fails:**

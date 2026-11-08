@@ -1,8 +1,8 @@
 ---
 name: std-builder
-description: Generate STD (YAML + test stubs with PSE docstrings) from an existing STP file
+description: Generate STD (YAML + test stubs with PSE docstrings) from an existing STP file or a scenario list, then auto-run review and refinement so the command finishes with a reviewed STD
 argument-hint: <JIRA-ID> [--priority=<p0|p1|p2>]
-allowed-tools: Read, Write, Edit, Task, Glob, Grep, Skill
+allowed-tools: Read, Write, Edit, Task, Glob, Grep, Skill, Bash
 ---
 
 # STD Builder
@@ -48,7 +48,8 @@ Use the Skill tool to invoke the pipeline-state skill:
 - skill: "pipeline-state"
 - args: "start-phase {JIRA_ID} std"
 
-This will:
+The skill runs `init` when the ticket has no state yet, then `check`, then
+`start-phase` (its Integration Pattern). This will:
 1. Read or initialize pipeline state
 2. Validate prerequisites (`stp.status == completed`)
 3. Check approval gate: if `stp_review` is in `approval_gates` (default: yes),
@@ -56,10 +57,20 @@ This will:
 4. Check if STP has been modified since last STD generation (staleness)
 5. Update `std` phase status to `in_progress`
 
+**Scenario-list input (no STP):** look for the input first, in Step 2's order.
+A ticket with a scenario list and no STP starts at this phase: `state.py check`
+passes it without the `stp` prerequisite and the `stp_review` gate, since there
+is no STP to complete or approve. When the ticket has no state file yet, run
+`state.py init` first (pipeline-state, Integration Pattern). Note in the report
+which input was used.
+
 **If prerequisites not met:** Show the suggestion (e.g., "Run `/stp-builder` first") and exit.
 
 **If approval gate blocks:** Show message: "STP Review is awaiting human approval.
-Run `/review-stp {JIRA_ID}` and `/refine-stp {JIRA_ID}` to complete the review cycle." and exit.
+Approve the reviewed STP from the dashboard, or run
+`/approve {JIRA_ID} stp`. (The review cycle runs automatically
+inside `/stp-builder`; if no review report exists yet, run
+`/review-stp {JIRA_ID}` and `/refine-stp {JIRA_ID}`.)" and exit.
 
 **If STP is stale:** Show warning but continue. The user can choose to re-run
 `/stp-builder` if needed.
@@ -97,21 +108,34 @@ YAML complete.
 
 Extract the Jira ID from `project_context.jira_id` (e.g., MYPROJ-12345, PROJ-494).
 
-## Step 2: Verify STP File Exists
+## Step 2: Verify the Input Exists
 
-**CRITICAL: STD generation requires an existing STP file.**
+**CRITICAL: STD generation requires one of two inputs.** Check in this order:
 
-Check that the STP file exists:
+1. **STP** — `outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md`
+2. **Scenario list** — `outputs/{JIRA_ID}/input/{JIRA_ID}_scenarios.yaml`
+
+**If the STP exists:** use it (it wins if both are present) and proceed to Step 3.
+
+**If only the scenario list exists:** validate it before use —
+
+```bash
+python3 skills/std-reviewer/validate_std.py --scenarios \
+  outputs/{JIRA_ID}/input/{JIRA_ID}_scenarios.yaml
 ```
-outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md
-```
 
-**If STP file does NOT exist:**
-- Inform the user: "STP file not found. Please run `/stp-builder {JIRA_ID}` first."
+Exit code 1: relay the errors and exit. Otherwise proceed to Step 3 with the
+scenario list as the input. This is the path for work that has no STP — bug
+fixes, smaller features, and scenarios imported from an external test case
+management system. The scenario list format is documented in **std-orchestrator
+Step 1B**. For Polarion, the **polarion-migration** skill writes one list per
+team (`migrate.py scenarios`).
+
+**If neither exists:**
+- Inform the user: "No STP or scenario list found for {JIRA_ID}. Run
+  `/stp-builder {JIRA_ID}` first, or provide a scenario list at
+  `outputs/{JIRA_ID}/input/{JIRA_ID}_scenarios.yaml` (see std-orchestrator Step 1B)."
 - Exit - do not proceed with STD generation
-
-**If STP file exists:**
-- Proceed to Step 3
 
 ## Step 3: Generate STD YAML (Internal Format)
 
@@ -123,8 +147,10 @@ Use the Skill tool to invoke the std-orchestrator skill:
 - args: "{JIRA_ID}"
 
 The std-orchestrator skill will:
-1. Read the STP file at `outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md`
-2. Parse Section III (Requirements-to-Tests Mapping table)
+1. Read the input resolved in Step 2 — the STP file at
+   `outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md`, or the scenario list at
+   `outputs/{JIRA_ID}/input/{JIRA_ID}_scenarios.yaml`
+2. Parse Section III (Requirements-to-Tests Mapping table) — STP input only
 3. Extract all test scenarios
 4. Generate comprehensive STD YAML file:
    - Output: `outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml`
@@ -157,10 +183,10 @@ Once complete, show the user:
 ```
 ✅ STD Generation Complete!
 
-📄 Input: outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md
+📄 Input: {the STP or scenario list path resolved in Step 2}
 
 📊 Summary:
-- STP scenarios: {TOTAL_COUNT}
+- Scenarios: {TOTAL_COUNT}
 - STD YAML: {JIRA_ID}_test_description.yaml (internal format)
 
 📁 STD Output (for review):
@@ -168,20 +194,21 @@ Once complete, show the user:
 - outputs/{JIRA_ID}/std/{language}-tests/ ({COUNT} test stubs)
 
 📋 Phase 1 Checklist:
-- [ ] STP link in module docstring
+- [ ] STP link (or Jira link, with no STP) in the module docstring and in every test
 - [ ] Tests grouped in class with shared preconditions
 - [ ] Each test has: Preconditions, Steps, Expected
-- [ ] Each test verifies ONE thing with ONE Expected
+- [ ] Each test verifies ONE thing with ONE Expected (a migrated Polarion case keeps
+      all its source's expected results in one stub)
 - [ ] Python test bodies contain only PSE docstring (no `pass`); Go stubs use PendingIt() with Skip()
 
 ✅ Ready for design review!
 
 📌 Next steps:
-1. Review the test stubs (the STD)
-2. Submit PR for design review
-3. After approval, run:
-   - /generate-tests {JIRA_ID}
-   - 
+1. Automated review runs next (see Step 7) — the review report and verdict
+   follow this summary
+2. Approve the reviewed STD (dashboard, or /approve {JIRA_ID} std)
+3. Submit PR for design review
+4. After approval, run /generate-tests {JIRA_ID}
 ```
 
 ---
@@ -191,11 +218,14 @@ Once complete, show the user:
 ```
 outputs/{JIRA_ID}/std/
 ├── {JIRA_ID}_test_description.yaml     (STD YAML - internal format)
-├── go-tests/                           (Tier 1 STD - test stubs)
+├── go-tests/                           (stubs for the scenarios routed to Go)
 │   └── {feature}_stubs_test.go         (PendingIt + PSE comments)
-└── python-tests/                       (Tier 2 STD - test stubs)
+└── python-tests/                       (stubs for the scenarios routed to Python)
     └── test_{feature}_stubs.py         (__test__=False + PSE docstrings)
 ```
+
+Which tier goes to which language is project config, not a fixed mapping
+(stub-generator Steps 2-3): only the directories for the languages in use exist.
 
 ---
 
@@ -206,27 +236,29 @@ User: /std-builder {JIRA_ID}
   ↓
 0. Resolve project: project-resolver → project_context
   ↓
-1. Verify STP exists: outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md
+1. Verify the input exists: the STP (outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md),
+   or a scenario list (outputs/{JIRA_ID}/input/{JIRA_ID}_scenarios.yaml)
   ↓
 2. Generate STD YAML (internal):
    → outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml
   ↓
-3. Generate test stubs (respecting feature toggles):
-   → outputs/{JIRA_ID}/std/go-tests/*_stubs_test.go (if tier1_tests enabled)
-   → outputs/{JIRA_ID}/std/python-tests/test_*_stubs.py (if tier2_tests enabled)
+3. Generate test stubs (respecting feature toggles), one directory per language:
+   → outputs/{JIRA_ID}/std/go-tests/*_stubs_test.go (scenarios routed to Go)
+   → outputs/{JIRA_ID}/std/python-tests/test_*_stubs.py (scenarios routed to Python)
   ↓
 4. Report results:
    STD complete - ready for design review
+  ↓
+5. Auto-chain review (skipped when std_review toggle is false):
+   → /review-std → outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_review.md
+   → /refine-std --address-findings --no-notes, when there are critical or major findings
 ```
 
 ---
 
 ## Error Handling
 
-**If STP file not found:**
-- Error message: "STP file not found at outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md"
-- Suggestion: "Please run `/stp-builder {JIRA_ID}` first to create the STP"
-- Exit without proceeding
+**If neither the STP nor a scenario list is found:** see Step 2.
 
 **If STP Section III is empty:**
 - Error message: "No test scenarios found in STP Section III"
@@ -248,8 +280,9 @@ User: /std-builder {JIRA_ID}
 ## Prerequisites
 
 **Before running this command:**
-1. ✅ STP file must exist (run `/stp-builder {JIRA_ID}` first)
-2. ✅ STP must contain Section III with test scenarios
+1. ✅ An STP with Section III scenarios (run `/stp-builder {JIRA_ID}` first), or a
+   scenario list at `outputs/{JIRA_ID}/input/{JIRA_ID}_scenarios.yaml`
+   (std-orchestrator Step 1B)
 
 ---
 
@@ -266,8 +299,7 @@ Output: outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md
 User: /std-builder {JIRA_ID}
 Output:
    - outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml (internal)
-   - outputs/{JIRA_ID}/std/go-tests/*_stubs_test.go (if tier1_tests enabled)
-   - outputs/{JIRA_ID}/std/python-tests/test_*_stubs.py (if tier2_tests enabled)
+   - outputs/{JIRA_ID}/std/{language}-tests/ (one directory per language the scenarios route to)
 ```
 
 **Step 3: After Design Review - Generate Implementation**
@@ -281,6 +313,16 @@ Output: Full working test implementations
 
 ## Step 6: Update Pipeline State (on completion)
 
+When `std_review` is off, Step 7 will not run the mechanical validator, so run it
+now, before completing the phase. If it fails, fail the phase (below) with its
+errors instead of completing it:
+
+```bash
+python3 skills/std-reviewer/validate_std.py \
+  outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml \
+  --stubs outputs/{JIRA_ID}/std/python-tests outputs/{JIRA_ID}/std/go-tests
+```
+
 After all generation completes successfully:
 
 **Tool:** Skill
@@ -288,10 +330,19 @@ After all generation completes successfully:
 - skill: "pipeline-state"
 - args: "complete-phase {JIRA_ID} std"
 
-Pass phase-specific data:
+First compute the STP checksum with a real command — never write the hash from
+memory (a fabricated value silently defeats the STD-staleness gate). With a
+scenario list there is no STP: checksum the list file instead, and pass
+`scenario_list` (its path) and `scenario_list_checksum_at_generation` in place of
+`stp_checksum_at_generation`.
+
+**Tool:** Bash
+**Command:** `shasum -a 256 outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md | cut -d ' ' -f 1`
+
+Pass phase-specific data (use the computed hash, prefixed `sha256:`):
 ```yaml
 output: "outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml"
-stp_checksum_at_generation: <SHA-256 of STP file>
+stp_checksum_at_generation: "sha256:{COMPUTED_HASH}"
 scenario_counts:
   total: {TOTAL_COUNT}
   tier1: {TIER1_COUNT}
@@ -310,6 +361,56 @@ If generation **fails**, update with:
 - args: "fail-phase {JIRA_ID} std"
 
 After state update, show the **next-step suggestion** from the response.
+
+---
+
+## Step 7: Review & Refine (automatic)
+
+The STD just generated is a draft. Chain the review cycle now — do not stop
+and wait for the user to trigger it. Review and refinement stay separate
+commands with separate artifacts and verdicts (they are chained, not merged):
+the reviewer runs in its own context against the STP and STD artifacts, so it
+can genuinely reject what the generator produced.
+
+**Check the `std_review` toggle first:** if
+`project_context.feature_toggles.std_review` is false, skip this step and
+report the STD as generated but unreviewed. Do not invoke review or refine.
+
+1. Invoke the review:
+
+   **Tool:** Skill
+   **Parameters:**
+   - skill: "review-std"
+   - args: "{JIRA_ID}"
+
+   This produces `outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_review.md` with a
+   verdict (APPROVED / APPROVED_WITH_FINDINGS / NEEDS_REVISION).
+
+2. **If the review has any CRITICAL or MAJOR findings** (verdict
+   `NEEDS_REVISION`, or `APPROVED_WITH_FINDINGS` with 1+ major), invoke the
+   refine loop:
+
+   **Tool:** Skill
+   **Parameters:**
+   - skill: "refine-std"
+   - args: "{JIRA_ID} --address-findings --no-notes"
+
+   This iterates fix → re-review until 0 critical AND 0 major findings, or
+   its iteration / no-improvement cap is hit. MINOR findings are not
+   targeted. Skip this invocation when the review has 0 critical and 0 major
+   (APPROVED, or APPROVED_WITH_FINDINGS with minors only).
+
+Close with a short summary: initial verdict → final verdict (and refinement
+iterations, if the loop ran), then the next step — `/generate-tests {JIRA_ID}`,
+noting that the `std_review` approval gate still requires a human to approve
+the reviewed STD first (dashboard, or `/approve {JIRA_ID} std`).
+The automatic review does not self-approve the gate.
+
+**Failure isolation:** if review or refinement fails, do NOT delete or
+regenerate the STD. Report the saved STD paths, the sub-command's error, and
+the manual recovery (`/review-std {JIRA_ID}`, then `/refine-std {JIRA_ID}` if
+needed). A failed review leaves a draft STD — that is strictly better than no
+STD.
 
 ---
 

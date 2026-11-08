@@ -1,7 +1,7 @@
 ---
 name: review-stp
 description: Review a generated STP document for QE quality, rule compliance, and requirement coverage
-argument-hint: <JIRA-ID>
+argument-hint: <JIRA-ID> [--fresh]
 allowed-tools: Read, Write, Edit, Glob, Grep, Skill, mcp__mcp-atlassian__jira_get_issue, mcp__mcp-atlassian__jira_search
 ---
 
@@ -15,7 +15,14 @@ STP document by invoking the **stp-reviewer** skill.
 The user has provided: `$ARGUMENTS`
 
 This should be a Jira ticket ID (e.g., `PROJ-123`, `PROJ-789`) for which an STP
-has already been generated.
+has already been generated, optionally followed by `--fresh` (Step 3).
+
+Split `$ARGUMENTS` on whitespace: tokens starting with `--` are flags, the remaining
+token is the Jira ID. Pass only the Jira ID to project-resolver — never the flags.
+
+This command reviews the document **as it is on disk now** — including a manual
+edit made after an earlier review — and does not write `approvals.yaml`; its only
+state write is Step 7b.
 
 ## Workflow
 
@@ -26,7 +33,7 @@ Use the Skill tool to invoke the project-resolver skill:
 **Tool:** Skill
 **Parameters:**
 - skill: "project-resolver"
-- args: "$ARGUMENTS"
+- args: "{JIRA_ID}" (the Jira ID token from `$ARGUMENTS`, flags stripped)
 
 This returns `project_context` containing:
 - `project_id`, `display_name`, `jira_id`
@@ -64,6 +71,21 @@ outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md
 
 Fetch the Jira ticket data for comparison against the STP. This is essential for
 Dimension 2 (Requirement Coverage) and Dimension 4 (Risk & Limitation Accuracy).
+
+**Check for a persisted snapshot FIRST:**
+
+```text
+outputs/{JIRA_ID}/stp/{JIRA_ID}_jira_data.yaml
+```
+
+This snapshot is written by the jira-collector agent during `/stp-builder`. If
+the file exists and is readable YAML, use it as the Jira source data instead of
+re-fetching — set `jira_data_available: true`, note the snapshot's file
+timestamp in the review report ("Jira data: snapshot from {mtime}"), and skip
+the live fetch below. Re-fetch from Jira ONLY if the snapshot is absent,
+unreadable, or the user passed a `--fresh` flag.
+
+**Live fetch (snapshot absent/unreadable or `--fresh`):**
 
 Use the Jira MCP tools to fetch:
 
@@ -199,6 +221,31 @@ outputs/{JIRA_ID}/reviews/{JIRA_ID}_stp_review.md
 ```
 
 Use the Write tool to save the report.
+
+### Step 7b: Update Pipeline State
+
+Record the review outcome so the state file (and dashboard) always match the
+saved report — a standalone re-review that skips this leaves a stale verdict
+on record:
+
+**Tool:** Skill
+**Parameters:**
+- skill: "pipeline-state"
+- args: "complete-phase {JIRA_ID} stp_review"
+
+Pass the review outcome via `--output` and `--extra`:
+```yaml
+output: "outputs/{JIRA_ID}/reviews/{JIRA_ID}_stp_review.md"
+verdict: {APPROVED | APPROVED_WITH_FINDINGS | NEEDS_REVISION}
+findings:
+  critical: {X}
+  major: {Y}
+  minor: {Z}
+```
+
+If the review itself **fails** (no report produced), use:
+- skill: "pipeline-state"
+- args: "fail-phase {JIRA_ID} stp_review --error '{message}'"
 
 ### Step 8: Report to User
 

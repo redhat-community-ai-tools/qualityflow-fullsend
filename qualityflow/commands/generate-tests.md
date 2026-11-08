@@ -2,13 +2,17 @@
 name: generate-tests
 description: Generate working test implementations from STD YAML
 argument-hint: <JIRA-ID> [--priority=<p0|p1|p2>]
-allowed-tools: Read, Write, Edit, Task, Glob, Grep, LSP, Skill
+allowed-tools: Read, Write, Edit, Task, Glob, Grep, LSP, Skill, Bash
 ---
 
 # Generate Tests Command
 
 Generates **full working test implementations** from STD YAML, in whatever
-languages and frameworks the project config declares.
+languages and frameworks the project config declares, **inside a checkout of
+the team's tests repo**: the generator uses only the fixtures, helpers and
+markers that repo really has, writes each test where it belongs there, and
+checks it with the repo's own tooling. The phase is experimental until that
+check passes, and the check collects or compiles; it never runs a test.
 
 **Use this after design review is approved.** For test stubs (design phase), use `/std-builder` instead.
 
@@ -71,6 +75,68 @@ If no language configs are found and both tier toggles are false:
 Check for STD YAML at `outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml`.
 If not found, tell the user to run `/std-builder {JIRA_ID}` first.
 
+## Step 2.2: Require the Tests Repo Checkout
+
+Generation needs the real suite; without it every fixture name and import is a
+guess. Find the checkout:
+
+- **Configured project:** in `{config_dir}/repositories.yaml`, the repo that
+  holds this language's tests: `tier2_repo` when it is set and its `language`
+  matches the STD's `code_generation_config.language`, else `primary_repo`. The
+  checkout is the directory in the environment variable its `local_path_env`
+  names (for example `SOURCE_REPO_PATH`).
+- **Auto-discovered project** (`config_dir: null`):
+  `project_context.discovery.source_repo_path`.
+
+If there is no such variable, or it does not point at a directory, **stop**
+before touching pipeline state:
+
+```text
+Error: /generate-tests needs a local checkout of {repo full_name}.
+Clone it and set {local_path_env} to its path, then re-run.
+```
+
+Do not generate without it.
+
+Then pick each scenario's target directory, repo-relative:
+`code_generation_config.target_test_directories` / `target_test_directory` from
+the STD. When the STD names none, or names one outside the checkout, use the
+folder of the existing tests closest to the feature (grep the checkout for the
+STD's component and feature terms) and say so in the summary.
+
+## Step 2.5: Pipeline State
+
+Code generation is a **single generic phase** (`codegen`), regardless of how
+many languages Step 1 enables — the phase machine is language-agnostic. Use the
+Skill tool to invoke the pipeline-state skill once:
+
+**Tool:** Skill
+**Parameters:**
+- skill: "pipeline-state"
+- args: "start-phase {JIRA_ID} codegen"
+
+This will:
+1. Read or initialize pipeline state
+2. Validate prerequisites (`std.status == completed`)
+3. Check approval gate: if `std_review` is in `approval_gates` (default: yes),
+   verify `outputs/{JIRA_ID}/state/approvals.yaml` has `std_review.status == approved`
+4. Check if the STD has been modified since it was recorded (staleness)
+5. Update the phase status to `in_progress`
+
+**If the approval gate blocks:** Show message: "STD Review is awaiting human
+approval. Approve the reviewed STD from the dashboard, or run
+`/approve {JIRA_ID} std`. (The review cycle runs automatically
+inside `/std-builder`; if no review report exists yet, run
+`/review-std {JIRA_ID}` and `/refine-std {JIRA_ID}`.)" and exit — do not
+generate for ANY language. The gate is on the STD itself, not per-language,
+so one block means the STD is not approved.
+
+**If prerequisites are not met:** Show the suggestion (e.g., "Run
+`/std-builder` first") and exit.
+
+**If the STD is stale:** Show the warning but continue. The user can choose
+to re-run `/std-builder` if needed.
+
 ## Step 3: LSP Pattern Analysis (if enabled)
 
 If `lsp_analysis` toggle is true:
@@ -89,6 +155,53 @@ Use the Skill tool to invoke the feature-finder skill:
 - skill: "feature-finder"
 - args: "{JIRA_ID}"
 
+## Step 3.5: Collect the Suite's Vocabulary
+
+For each target directory and language, run from the QualityFlow root:
+
+```bash
+python3 skills/test-generator/repo_context.py context "$CHECKOUT" {target_dir} --language {python|go}
+```
+
+It prints the fixtures every `conftest.py` on the path from the repo root to
+the target directory defines (and the `pytest_plugins` modules they load), the
+helper modules the sibling tests import, the markers the repo registers
+(`pytest.ini`, `pyproject.toml`, `tox.ini`, `setup.cfg`, `pytest_configure`),
+whether `--strict-markers` is on, and up to three sibling tests. A fixture that
+reads `request.param` (itself or through a fixture it uses) carries
+`needs_indirect_param`: the fixtures a test must parametrize with
+`indirect=True`, as its siblings do. That output is
+the generator's **allowed vocabulary**: pass it to Step 4 as is. This replaces
+the ticket-context-analyzer agent for code generation; do not invoke it here.
+
+## Step 3.7: Read the Product Interface
+
+The STD says what each scenario does; the product code says how. Before writing
+any test, open the product checkout (`primary_repo`'s `local_path_env` when the
+tests live in another repo, else the tests checkout itself) and find, for each
+scenario, the interface its steps drive: the CLI command and flags, the API
+route and payload fields, CRD and config fields, table and column names, error
+messages. Run the search first; it does not depend on the model remembering to:
+
+```bash
+python3 skills/test-generator/repo_context.py product \
+  outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml "$PRODUCT_CHECKOUT" "$CHECKOUT"
+```
+
+It reports where each of the STD's `source_constants` is now (`file:line`, or
+`moved:` / `not found`), and per scenario the files in the product checkout and
+in the tests checkout that hold most of its terms (its constants, literal
+parameter values and title words), code and config only. Open those files,
+read the interface and the suite helpers that already drive it, and record what
+you use in `summary.yaml` as `product_refs: {<scenario>: [file:line, ...]}`;
+pass it to Step 4. A `<TBD: …>` parameter in the STD is resolved from these
+files, never left as a reason to decline.
+
+Never conclude the product lacks a feature without searching the product
+checkout. A scenario whose interface is not there after that search goes under
+`not_implemented`, its reason naming the files the search listed and why none
+of them is the interface.
+
 ## Step 4: Generate Tests
 
 Use the Skill tool to invoke the test-generator skill:
@@ -99,10 +212,116 @@ Use the Skill tool to invoke the test-generator skill:
 - args: "{JIRA_ID} {priority_filter}"
   (e.g., "PROJ-12345 P0" if filtering, "PROJ-12345" if not)
 
-The skill reads the STD YAML and project config to generate tests
-for each enabled language/framework.
+Hand it the checkout path, Step 3.5's vocabulary and Step 3.7's product
+references. Each test performs its own scenario's steps: the setup the STD
+lists (seed the data, set the flag or field), the action, and every expected
+result, using the names in `product_refs`. Tests for different scenarios that
+repeat one action and check different trivia implement none of them. The skill writes each test
+to `outputs/{JIRA_ID}/{language}-tests/` and to its repo-relative `target_path`
+in the checkout, and records `target_path` per file in that folder's
+`summary.yaml`.
+
+## Step 4.5: Verify in the Checkout
+
+Run the check inside the checkout, with the repo's own tooling, on the files
+written there:
+
+```bash
+python3 skills/test-generator/repo_context.py verify "$CHECKOUT" {target_path} ... \
+  --repos-yaml {project_context.config_dir}/repositories.yaml \
+  --summary outputs/{JIRA_ID}/{language}-tests/summary.yaml --product "$SOURCE_REPO_PATH"
+```
+
+- Every `product_refs` `file:line` must exist in a checkout (the product's, or
+  the tests repo's). A plan made while the feature PR was open cites code the
+  checked-out commit may not have: test only what the checkout has, and list
+  the rest under `not_implemented` with that reason.
+
+- Python: `pytest --setup-plan -q <files>` with the repo's `.venv` when it has
+  one, else `uv run pytest` when the repo has `uv.lock`, else `python -m pytest`
+  (`uv run` panics inside a macOS sandbox): it collects every file AND resolves every fixture a test asks for,
+  running nothing — `--collect-only` let an invented fixture name pass. A file
+  pytest's default discovery would skip (`test_*.py` / `*_test.py`) fails
+  outright. The repo entry's `verify: {env, args}` is applied: what the repo's
+  own CI sets to collect offline, e.g. an env var that stops its conftest from
+  contacting a cluster (config/README.md).
+- Python, first: a test that never touches the product fails before pytest
+  runs: no fixture (a parametrize value is not one) and no call into the suite
+  or the product, directly or through a helper in the same file; or a body that
+  calls `pytest.fail`, `pytest.skip` or `pytest.xfail` outside any condition,
+  only passes, or only asserts a constant. Such a test passes (or reports as
+  skipped) while testing nothing. Implement it for real, or remove it and list the
+  scenario under `not_implemented` (its stub stays pending).
+- Python, then: a test that uses a `needs_indirect_param` fixture without
+  parametrizing those fixtures `indirect=True` (on the test, its class or
+  `pytestmark`) fails: `--setup-plan` never runs a fixture body, so it would
+  collect and then error at setup on every real run.
+- Python, also: a file that imports a `Test*` class or `test*` function from
+  one of the team's test modules (`test_*.py` / `*_test.py`) fails: pytest
+  collects imported tests, so the team's tests would run again under it.
+  Import helpers from the suite's utils instead.
+- Every listed file must be QualityFlow's: `test_qf_*.py`, `qf_*_test.go`, or a
+  `conftest.py` the checked-out commit does not have. A team's own test listed
+  as output fails the check.
+- Go: `go vet ./<pkg>`, then `go test -c -o /dev/null ./<pkg>` (builds the
+  test binary and runs nothing, not even a TestMain that starts envtest or a database).
+
+When every scenario is `not_implemented`, write no test file and skip the
+check: record `verification: skipped` with the reason `no scenario could be
+implemented`. Never add tests to an empty file to make the check pass.
+
+It prints `verification: passed | failed | skipped`, a `reason` and the
+command. On `failed`, fix the tests (never by faking a fixture or helper) and
+re-run, at most 3 attempts. `skipped` means the tool could not run (uv, pytest
+or go missing, a timeout); say why.
+
+Collection and compilation are the limit of an offline check: imports,
+fixture names, markers and syntax resolve, but **no test ran**. Never claim
+the tests pass.
 
 ## Step 5: Report Results
 
-Show a summary of generated files per language, test counts,
-and any errors or warnings.
+Show a summary of generated files with their `target_path`, test counts, the
+scenarios left `not_implemented` and why, any
+fixtures the generator had to add (and where), the verification result and
+reason, and the line: "Verification collects/compiles the tests in your
+checkout; it does not run them."
+
+## Step 6: Update Pipeline State (on completion)
+
+Close out the single `codegen` phase started in Step 2.5, honestly.
+
+**If generation produced test files**, whatever the verification result:
+
+**Tool:** Skill
+**Parameters:**
+- skill: "pipeline-state"
+- args: "complete-phase {JIRA_ID} codegen"
+
+Pass `--output outputs/{JIRA_ID}/{language}-tests/summary.yaml` for the primary
+language (complete-phase records its checksum; a missing file warns without
+failing) and phase-specific data:
+
+```yaml
+test_count: {TEST_COUNT}
+not_implemented: {NOT_IMPLEMENTED_COUNT}
+files: {FILE_COUNT}
+verification: passed | failed | skipped
+verification_reason: "{reason from Step 4.5}"
+```
+
+With several languages, record the worst result (`failed`, then `skipped`,
+then `passed`) and name each language's in the reason. The status stays
+`completed`; `verification` other than `passed` marks the
+tests unverified, and the dashboard keeps the phase labelled experimental.
+
+**If generation errored and produced no test files:**
+
+**Tool:** Skill
+**Parameters:**
+- skill: "pipeline-state"
+- args: "fail-phase {JIRA_ID} codegen"
+
+with the error message.
+
+After the state updates, show the **next-step suggestion** from the response.

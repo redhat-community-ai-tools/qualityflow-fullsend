@@ -6,6 +6,16 @@ model: claude-opus-4-6
 
 # Test Generator Skill
 
+**Ticket repository scope:** When `project_context.repositories` is present, it
+is the complete repository configuration for this ticket. Use it instead of
+reading shared `repositories.yaml`; pass `project_context.repositories_file`
+to tools requiring a YAML filename. Prefer each entry's `local_path` over its
+`local_path_env` variable. Search, fetch, clone and trace only entries in this
+resolved configuration; a removed slot is unavailable (do not fall back to
+shared config or another checkout). This applies to every example below.
+Without that context field, keep the existing repository lookup behavior.
+
+
 ## Purpose
 
 Generates **working test code** from STD YAML specifications. Reads
@@ -25,9 +35,19 @@ configured language/framework.
 - `priority_filter`: (Optional) Priority level to generate tests for
   ("P0", "P1", or "P2")
 
+- `checkout`: path of the tests repo checkout (from `/generate-tests` Step 2.2)
+- `vocabulary`: `repo_context.py context` output per target directory
+  (`/generate-tests` Step 3.5)
+- `product_refs`: per scenario, the `file:line`s in the product checkout of the
+  interface its steps drive, read from the files `repo_context.py product`
+  listed (`/generate-tests` Step 3.7)
+
 **Prerequisites:**
 - STD YAML at `outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml`
-- At least one language config file in `{project_context.config_dir}/`
+- At least one language config file in `{project_context.config_dir}/`, or an
+  STD `code_generation_config` (auto mode)
+- A checkout of the tests repo. No checkout: stop and say which env var to set;
+  never generate against a guessed suite.
 
 ---
 
@@ -35,17 +55,50 @@ configured language/framework.
 
 ```
 outputs/{JIRA_ID}/go-tests/           (if Go enabled)
-├── {feature}_test.go
+├── qf_{feature}_test.go
 └── summary.yaml
 
 outputs/{JIRA_ID}/python-tests/       (if Python enabled)
-├── test_{feature}.py
-├── conftest.py
+├── test_qf_{feature}.py
 └── summary.yaml
 
 outputs/tests/{JIRA_ID}/{language}/   (any other language)
 └── ...
 ```
+
+Each test file is also written into the checkout at its `target_path`: the
+repo-relative path where it belongs (`{target_dir}/{file}`), so it is
+verified with the suite's real conftest chain and a push can place it there.
+`summary.yaml` records it:
+
+```yaml
+jira_id: PROJ-123
+language: python
+framework: pytest
+test_count: 4
+qf_test_id_marker: false        # the repo does not register qf_test_id
+files:
+  - name: test_qf_login.py
+    target_path: tests/api/test_qf_login.py
+    scenarios: [1, 2, 3, 4]     # STD scenario numbers, in test order
+product_refs:                   # per scenario: where its interface is in the product checkout
+  1: [src/app/login.py:42, src/app/errors.py:7]
+new_fixtures:                   # only fixtures the generator had to add
+  - {name: locked_user, file: tests/api/test_qf_login.py, why: "no existing fixture creates a locked user"}
+not_implemented:                # scenarios with no test; their stubs stay pending
+  - {scenario: 5, why: "the audit-log API this scenario needs does not exist in the product yet"}
+verification: passed            # passed | failed | skipped (repo_context.py verify)
+verification_reason: "collected; no test was run"
+```
+
+A `conftest.py` appears only when the generator added one under the rules
+below; it gets a `target_path` too.
+
+Test file names start with the STD's `code_generation_config.filename_prefix`:
+`qf_` for Go, `test_qf_` for Python. Never name a Python test `qf_{feature}.py`
+or `qf_test_{feature}.py`. pytest's default `python_files` is
+`test_*.py *_test.py`, so such a file is collected only when named on the
+command line, and the target repo's CI never runs it.
 
 ---
 
@@ -95,6 +148,14 @@ Extract:
 - Total scenario count
 - Scenarios grouped by tier/type
 - Test objectives, steps, assertions
+- `document_metadata.stp_reference.url` (fall back to `.file`) — `{STP_URL}`,
+  emitted in the file header and in every test's docstring/comment. When the STD
+  has no `stp_reference` (bug fixes and other non-STP inputs), emit
+  `Jira: {JIRA_URL}` instead — every test carries exactly one of the two, never an
+  `STP:` line with an empty value. `{JIRA_URL}` is `document_metadata.jira_url`,
+  and a test whose scenario has its own `jira_url` links that one instead. A
+  case migrated from Polarion links its own requirement.
+- Each scenario's `polarion_id`, if any. See the Python rules below.
 
 ### Step 2.5: Filter by Coverage Status and Priority
 
@@ -127,14 +188,102 @@ If `priority_filter` is null, all scenarios proceed (default behavior).
 AND (`priority` == priority_filter OR priority_filter is null OR priority
 field missing)
 
+**Coverage targets (optional):**
+
+When a scenario carries `coverage_targets`, the generated test exists to make
+those specific lines execute. Two obligations:
+
+1. **Generate it first.** Order the working set so scenarios with
+   `coverage_targets` come before those without. If generation is truncated
+   for any reason, the gap-closing tests are the ones that survive.
+2. **Record the target in the test.** Emit the target as a comment on the
+   generated test function so a reviewer can verify the claim:
+
+   ```go
+   // Coverage target: internal/harness/compose.go:45-47 (ResolveOverlays)
+   ```
+
+Do not assert on coverage numbers inside the test — the test must fail for
+behavioral reasons, not coverage reasons. `coverage_targets` documents intent
+and drives ordering; it is not a test oracle.
+
+A scenario whose `coverage_status_source` is `measured` must never be dropped
+as a duplicate on static grounds — a measurement already disagreed with static
+analysis once for this scenario.
+
+### Step 2.7: Use Only the Suite's Vocabulary
+
+The `vocabulary` input is the suite as it is. Generated code may use:
+
+- **Fixtures:** those listed in `fixtures` (by their listed name), pytest's
+  built-ins (`request`, `tmp_path`, `monkeypatch`...), those of pytest plugins
+  the repo already depends on, or one the STD explicitly defines as new.
+- **Imports:** standard library, the test framework, packages the repo already
+  depends on, and the `helpers` modules (and names) sibling tests import. Any
+  other project import must resolve to a file in the checkout; open it and use
+  what it really defines.
+- **Markers:** those in `markers.registered`. Under `strict: true` any other
+  marker fails collection.
+- **Style:** follow the `siblings` (read them): class vs function tests,
+  fixture use, assertion and wait helpers, docstring layout.
+
+Never:
+
+- write a `conftest.py` that redefines a fixture the vocabulary lists, or edit
+  an existing `conftest.py`;
+- fake, stub or re-implement a suite utility, client or fixture ("harness"
+  fakes, local stand-ins): a test that passes against its own fakes proves
+  nothing about the team's environment;
+- write a test that cannot fail for the feature's reasons: one that asserts
+  its own constants, its scenario id or `True`, or calls `pytest.fail`,
+  `pytest.skip` or `pytest.xfail` unconditionally (a skipped placeholder reads
+  as coverage). A scenario you cannot implement (the product interface,
+  fixture or environment it needs is missing) is left out of the file: list it
+  under `not_implemented` in `summary.yaml` with the reason, and its Phase 1
+  stub stays pending. The check (Step 4.5) fails a test that takes no fixture
+  and calls nothing from the suite or the product. A reason that blames a
+  missing fixture, helper or product interface names what was searched for
+  (the vocabulary, and the grep pattern and folders), so a reviewer can tell a
+  real gap from one the run did not look for;
+- write a test from the STD alone: each test performs its scenario's setup
+  (seed the data, set the flag or field), action and every expected result,
+  with the names its `product_refs` point at. Tests for different scenarios
+  that repeat one action and check different trivia implement none of them;
+- decide the product lacks a feature, or leave a `<TBD: …>` parameter
+  unresolved, without opening the files `repo_context.py product` listed for
+  that scenario; a decline names those files and why none is the interface;
+- add tests to make the check pass: when every scenario is `not_implemented`,
+  write no file and record `verification: skipped`;
+- use a fixture whose vocabulary entry has `needs_indirect_param` without
+  `@pytest.mark.parametrize(<those fixtures>, [...], indirect=True)` on the
+  test, its class or `pytestmark`, as the sibling tests do: it reads
+  `request.param`, and every test without it errors at setup;
+- import a `Test*` class or `test*` function from the team's test modules
+  (`from tests.x.test_y import TestY`), or subclass one: pytest collects it
+  again under the generated file, so the team's tests run twice. Import
+  helpers from the suite's utils modules;
+- list or edit a file the team already has: generated files are new and named
+  `test_qf_*.py` / `qf_*_test.go` (or a new `conftest.py`).
+
+A fixture the vocabulary lacks and the scenario needs goes **in the test
+module**. Only when the target directory has no `conftest.py`
+(`existing_conftest: null`) and more than one generated file needs it, put it
+in a new `conftest.py` there. Either way list it under `new_fixtures` in
+`summary.yaml` with the reason, and in the report.
+
 ### Step 3: Load Pattern Rules
 
 **If config_dir is null:** Skip config-based pattern loading. Use only LSP patterns
 (if available) and the `code_generation_config` from the STD YAML.
 
-**If config_dir is available:** For each enabled language, read patterns from:
-- `{project_context.config_dir}/patterns/{language}_patterns.yaml`
+**If config_dir is available:** For each scenario, read the pattern library for
+the scenario's tier from:
+- `{project_context.config_dir}/patterns/tier{N}_patterns.yaml`
+  (e.g., `tier1_patterns.yaml` for Tier 1 scenarios, `tier2_patterns.yaml` for Tier 2)
 - Fresh LSP patterns if available
+
+**Precedence:** fresh LSP-derived patterns take priority over the config
+pattern library when both cover the same symbol.
 
 ### Step 4: Generate Tests Per Language
 
@@ -163,6 +312,7 @@ import (
 func TestFeatureName(t *testing.T) {
     // shared setup
 
+    // STP: {STP_URL}
     t.Run("scenario description", func(t *testing.T) {
         // test implementation
         // use assert.Equal(t, expected, actual)
@@ -178,11 +328,13 @@ func TestFeatureName(t *testing.T) {
 - Build tags from `build_tags` array → `//go:build tag1 && tag2`
 - Import paths from `imports.standard`, `imports.test_framework`, `imports.project`
 - Package name from `default_package` or derived from test file location
+- `// STP: {STP_URL}` comment above every `t.Run(`
 
 **Validation:**
 - Count `t.Run(` calls = count of STD scenarios
 - All imports resolve (no unused imports)
 - Build tag line present if `build_tags` configured
+- Every `t.Run(` preceded by an `STP:` comment
 
 ---
 
@@ -202,6 +354,7 @@ import (
 
 var _ = Describe("[JIRA-ID] Feature", func() {
     Context("scenario group", func() {
+        // STP: {STP_URL}
         It("[test_id:TS-XXX] should do X", func() {
             // test implementation
         })
@@ -213,12 +366,14 @@ var _ = Describe("[JIRA-ID] Feature", func() {
 - Dot imports for ginkgo and gomega
 - `Describe/Context/It` hierarchy
 - `[test_id:TS-XXX]` labels in `It()` descriptions
+- `// STP: {STP_URL}` comment above every `It()`
 - `BeforeEach` for shared setup
 - `Expect().To()` / `Expect().NotTo()` for assertions
 
 **Validation:**
 - Count `It(` blocks = count of STD Functional scenarios
 - All `[test_id:TS-XXX]` present
+- Every `It(` preceded by an `STP:` comment
 
 ---
 
@@ -228,7 +383,10 @@ When `framework: "pytest"` in the language config:
 
 **File structure:**
 ```python
-"""Tests for {feature} — {JIRA_ID}."""
+"""Tests for {feature} — {JIRA_ID}.
+
+STP: {STP_URL}
+"""
 import pytest
 # imports from config
 
@@ -242,42 +400,100 @@ class TestFeature:
         - {preconditions}
     """
 
+    @pytest.mark.qf_test_id("TS-XXX")   # only when the repo registers it
     def test_scenario_name(self, fixture1, fixture2):
-        """Scenario: {description} [TS-XXX]."""
+        """Scenario: {description} [TS-XXX].
+
+        STP: {STP_URL}
+        """
         # test implementation
         assert result == expected
 ```
 
 **Rules:**
 - `def test_*()` naming convention
-- Scenario ID in docstring for traceability
-- `conftest.py` for shared fixtures (if multiple test files)
-- Fixture naming: nouns, not verbs
+- Scenario ID in docstring for traceability (unchanged)
+- `STP: {STP_URL}` (`Jira: {JIRA_URL}` when the STD has no STP) in the module
+  docstring AND in every test docstring — a file-level reference does not
+  survive a test being moved to another module
+- **`@pytest.mark.qf_test_id("{test_id}")` on every generated test function
+  when the repo registers `qf_test_id`** (it is in `markers.registered`), in
+  addition to the docstring tag. It shows up in `pytest --collect-only` and
+  JUnit XML. It is a **QualityFlow marker, not a Polarion one**, independent of
+  the Polarion Toggle below. When the repo does not register it, omit it (an
+  unregistered mark fails collection under `--strict-markers`), never register
+  it from a generated `conftest.py`, and set `qf_test_id_marker: false` in
+  `summary.yaml`: the `[TS-…]` docstring tag plus each file's `scenarios` list
+  keep the traceability (scripts/qf_record_ci.py reads both).
+- A scenario with a `polarion_id` (a case migrated from Polarion) gets
+  `@pytest.mark.polarion("{polarion_id}")` with its real id, whatever the
+  Polarion Toggle says, stacked above `qf_test_id`. Its stub listed the id under
+  `Markers:`; now the test is implemented, the real decorator is right (a
+  repo's sync job may then mark the case Automated).
+- Every marker the stub lists under `Markers:`, and the scenario's STD `marker`
+  (e.g. `tier3` from `scenario_tiers`), becomes a real `@pytest.mark.{name}`
+  decorator on the test, stacked above `qf_test_id`. The target suite registers
+  its own markers (under `--strict-markers` any other one fails collection);
+  never invent one it does not register.
+- The project's `stub_marks` (e.g. `manual`) mark a stub as not yet automated:
+  the implemented test does not carry them.
+- Fixtures and helpers only from the vocabulary (Step 2.7); a new fixture is
+  named as a noun, not a verb
 - Context managers for resources
-- No `time.sleep()` — use polling utilities
+- No `time.sleep()` — use the suite's polling utilities
 
 **Validation:**
-- Count `def test_*` functions = count of STD End-to-End scenarios
+- Count `def test_*` functions + `not_implemented` entries = count of STD End-to-End scenarios
 - All scenario IDs in docstrings
-- `pytest --collect-only` passes (if pytest available)
+- Every test docstring contains an `STP:` line, or a `Jira:` line when the STD has
+  no STP. That line is the scenario's own `jira_url` when it has one.
+- Every scenario with a `polarion_id` has `@pytest.mark.polarion("{polarion_id}")`
+- When the repo registers `qf_test_id`, every `def test_*` has a matching
+  `@pytest.mark.qf_test_id(...)` decorator
+- Every scenario with an STD `marker` has that `@pytest.mark.{marker}` decorator
+- Every fixture argument and project import is in the vocabulary or listed
+  under `new_fixtures`; no generated `conftest.py` redefines a listed fixture
 
 ---
 
 ## Polarion Toggle
 
 If `project_context.feature_toggles.polarion` is false, omit Polarion
-test case ID markers from generated test code.
+test case ID markers from generated test code. This does NOT affect
+`@pytest.mark.qf_test_id(...)` — that marker is QualityFlow's own scenario
+id, independent of Polarion, and is always generated for Python tests. Nor
+does it affect a scenario's real `polarion_id` marker, which is always generated.
 
 ## Repo Rules Integration
 
 When `project_context.repo_rules` is available (e.g., AGENTS.md rules),
-apply those coding standards to all generated test code. Common rules:
+apply those coding standards to all generated test code, on top of the
+vocabulary (the rules say how to write; the vocabulary says what exists).
+Common rules:
 - Implicit markers (don't add explicitly)
 - Forbidden patterns (skip/skipif, etc.)
 - Fixture guidelines
 - Import conventions
 
 ---
+
+## Step 4.5: Verify in the Checkout
+
+`/generate-tests` Step 4.5 runs
+`python3 skills/test-generator/repo_context.py verify <checkout> <target_path>... --repos-yaml <repositories.yaml> --summary <summary.yaml> --product <product checkout>`
+on the files written to the checkout: `pytest --setup-plan -q` for Python, with
+the checkout's `.venv` (else `uv run` with `uv.lock`) — collection plus
+every fixture resolved, with the repo entry's `verify: {env, args}` applied — `go vet` plus
+`go test -c` (never runs TestMain) per package for Go. Before collecting it fails
+any `product_refs` `file:line` no checkout has (a plan made from an open PR), then
+any Python test that never touches the product (no fixture and no call into the
+suite or product, or a body that only fails or asserts a constant), any test that
+uses a `needs_indirect_param` fixture without that indirect parametrize, any
+file that imports a `Test*` class or `test*` function from a test module, and any
+listed file that is not QualityFlow's (not `test_qf_*.py` / `qf_*_test.go`, or a
+`conftest.py` the checked-out commit already has). Record its `verification` and
+`reason` in `summary.yaml`. Collection/compilation is the limit of this offline
+check; never report a test as passing.
 
 ## Step 5: Validate Complete Coverage
 
@@ -304,7 +520,9 @@ counts should match filtered scenarios only, not total STD scenarios. Report:
 
 Generate summary per language:
 - Language, framework
-- Files generated, line counts
+- Files generated with their `target_path`, line counts
+- New fixtures added, and why
+- Verification result and reason ("collected/compiled, not run")
 - Test count, scenario coverage
 - LSP patterns used (true/false)
 - Any errors or warnings
