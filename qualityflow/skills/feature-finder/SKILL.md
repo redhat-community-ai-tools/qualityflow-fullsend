@@ -6,6 +6,16 @@ model: claude-opus-4-6
 
 # Feature Finder Skill
 
+**Ticket repository scope:** When `project_context.repositories` is present, it
+is the complete repository configuration for this ticket. Use it instead of
+reading shared `repositories.yaml`; pass `project_context.repositories_file`
+to tools requiring a YAML filename. Prefer each entry's `local_path` over its
+`local_path_env` variable. Search, fetch, clone and trace only entries in this
+resolved configuration; a removed slot is unavailable (do not fall back to
+shared config or another checkout). This applies to every example below.
+Without that context field, keep the existing repository lookup behavior.
+
+
 **Phase:** Pre-Processing
 **User-Invocable:** false
 
@@ -33,11 +43,11 @@ Invoked by the **regression-analyzer** subagent when:
 ```yaml
 jira_data:
   summary: "Add ARM/multiarch support for node scheduling"
-  description: "Enable VMs to be scheduled on ARM nodes..."
+  description: "Enable workloads to be scheduled on ARM nodes..."
   components: [app-handler, node-labeller]
   labels: [ARM, multiarch]
   acceptance_criteria:
-    - VMs can be scheduled on ARM nodes
+    - Workloads can be scheduled on ARM nodes
     - Node labels correctly identify architecture
   feature_candidates:
     explicit_mentions: [ResourceInstance, NodeLabeller, ARM]
@@ -68,7 +78,7 @@ From the Jira data, extract:
 4. **Function/action names from acceptance criteria**
    - "schedule" → Schedule*, Scheduling*
    - "migrate" → Migrate*, Migration*
-   - "attach" → Attach*, Hotplug*
+   - "attach" → Attach*, HotAttach*
 
 ## Component-to-Package Mapping
 
@@ -124,6 +134,8 @@ For each component_hint:
 3. **Filter for exported symbols (uppercase first letter in Go)**
 
 ## Output Format
+
+**IMPORTANT:** Only report symbols/entry points actually named in the Jira source evidence or confirmed to exist by grep/LSP against the repo. Never infer, paraphrase, or fabricate a symbol, function, or feature name that isn't present in the input or the searched code.
 
 ```yaml
 discovered_entry_points:

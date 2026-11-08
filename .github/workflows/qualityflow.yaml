@@ -938,7 +938,7 @@ jobs:
 
           After generating test files:
 
-          1. Write qf_*_test.go / qf_test_*.py into each resolved package dir
+          1. Write qf_*_test.go / test_qf_*.py into each resolved package dir
           2. Run compile gate: `go test -run='^$' -count=1 ./...`
           3. Fix any compilation errors, retry up to 3 times
           4. Push only files that compile:
@@ -953,7 +953,7 @@ jobs:
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO_NAME}.git"
 
           # Stage co-located test files from source tree
-          find . \( -name 'qf_*_test.go' -o -name 'qf_test_*.py' \) -not -path '*/outputs/*' -exec git add {} +
+          find . \( -name 'qf_*_test.go' -o -name 'test_qf_*.py' \) -not -path '*/outputs/*' -exec git add {} +
 
           # Also stage metadata for post-pipeline summary
           git add outputs/ 2>/dev/null || true
@@ -1041,12 +1041,12 @@ jobs:
 
           # --- Count co-located qf_ test files in source tree ---
           GO_COUNT=$(find . -name "qf_*_test.go" -not -path "*/outputs/*" -not -path "*/.git/*" 2>/dev/null | wc -l | tr -d ' ')
-          PY_COUNT=$(find . -name "qf_test_*.py" -not -path "*/outputs/*" -not -path "*/.git/*" 2>/dev/null | wc -l | tr -d ' ')
+          PY_COUNT=$(find . -name "test_qf_*.py" -not -path "*/outputs/*" -not -path "*/.git/*" 2>/dev/null | wc -l | tr -d ' ')
 
           # --- Fallback: check outputs/ for tests in fallback mode ---
           if [[ "$((GO_COUNT + PY_COUNT))" -eq 0 ]]; then
             GO_COUNT=$(find outputs/ -name "qf_*_test.go" 2>/dev/null | wc -l | tr -d ' ')
-            PY_COUNT=$(find outputs/ -name "qf_test_*.py" 2>/dev/null | wc -l | tr -d ' ')
+            PY_COUNT=$(find outputs/ -name "test_qf_*.py" 2>/dev/null | wc -l | tr -d ' ')
           fi
 
           TOTAL_COUNT=$((GO_COUNT + PY_COUNT))
@@ -1058,7 +1058,7 @@ jobs:
             GO_DIRS=$(find . -name "qf_*_test.go" -not -path "*/outputs/*" -not -path "*/.git/*" -exec dirname {} \; 2>/dev/null | sort -u | head -3 | sed 's|^\./||' | paste -sd ',' - || true)
           fi
           if [[ "${PY_COUNT}" -gt 0 ]]; then
-            PY_DIRS=$(find . -name "qf_test_*.py" -not -path "*/outputs/*" -not -path "*/.git/*" -exec dirname {} \; 2>/dev/null | sort -u | head -3 | sed 's|^\./||' | paste -sd ',' - || true)
+            PY_DIRS=$(find . -name "test_qf_*.py" -not -path "*/outputs/*" -not -path "*/.git/*" -exec dirname {} \; 2>/dev/null | sort -u | head -3 | sed 's|^\./||' | paste -sd ',' - || true)
           fi
 
           # --- Remove intermediate artifacts (STP, STD, reviews, metadata) ---
@@ -1134,7 +1134,7 @@ jobs:
           if [[ "${PY_COUNT}" -gt 0 ]]; then
             PY_LOC=$(echo "${PY_DIRS:-source tree}" | cut -d',' -f1)
             TEST_ROWS="${TEST_ROWS}
-          | Python | **${PY_COUNT}** files | \`${PY_LOC}/qf_test_*.py\` |"
+          | Python | **${PY_COUNT}** files | \`${PY_LOC}/test_qf_*.py\` |"
           fi
           if [[ -z "${TEST_ROWS}" ]]; then
             TEST_ROWS="

@@ -2,11 +2,21 @@
 # Inherited by all projects; override in project.yaml
 version: "1.0"
 
+# Explicit user/model-env choices override this policy. Review models are only
+# selected automatically for stp_review/std_review, never generation/refinement.
+model_policy:
+  # Opt-in: per-runtime model ids per tier, e.g. a project.yaml with
+  #   model_policy: {review: {claude: opus}, standard: {codex: gpt-6.1-sol}}
+  # Empty = today's behaviour (the runtime's own default model).
+  cheap: {}
+  standard: {}
+  review: {}
+  max_cost_usd: 5.0  # warning per completed phase run; null disables
+
 feature_toggles:
-  test_case_markers: false
   polarion: false
+  polarion_lint: false     # true: Python stubs get `# noqa: PID001` (tests repo runs the flake8 PolarionIds plugin)
   unit_tests: false
-  exclude_unit_from_stp: false
   test_strategy: "auto"    # "auto" = detect from repo; "tier" = use tier1.yaml/tier2.yaml
   tier1_tests: true
   tier2_tests: true
@@ -22,15 +32,52 @@ output_structure:
   stp: "outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md"
   std: "outputs/{JIRA_ID}/std/{JIRA_ID}_test_description.yaml"
   stubs: "outputs/{JIRA_ID}/std/{language}-tests/{feature}_stubs{ext}"
-  tests: "{target_test_directory}/qf_{feature}{ext}"
-  tests_fallback: "outputs/{JIRA_ID}/{language}-tests/qf_{feature}{ext}"
+  tests: "{target_test_directory}/{test_file_prefix}{feature}{ext}"
+  tests_fallback: "outputs/{JIRA_ID}/{language}-tests/{test_file_prefix}{feature}{ext}"
   # Language-specific filename conventions (used by stub/test generators):
   #   Go:     {feature}_stubs_test.go / qf_{feature}_test.go
-  #   Python: test_{feature}_stubs.py / qf_test_{feature}.py
+  #   Python: test_{feature}_stubs.py / test_qf_{feature}.py
   stp_review: "outputs/{JIRA_ID}/reviews/{JIRA_ID}_stp_review.md"
   std_review: "outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_review.md"
 
-test_file_prefix: "qf_"
+# Generated test filenames start with this (STD code_generation_config.filename_prefix).
+# The qf_ marker goes after whatever the language's test discovery needs at the
+# start: go test keys on the _test.go suffix, but pytest's default python_files is
+# "test_*.py *_test.py", so qf_{feature}.py is collected only when named on the
+# command line, and the tests repo's CI never runs it.
+test_file_prefix:
+  go: "qf_"
+  python: "test_qf_"
+
+# Coefficients for the dashboard's "Time Saved" estimate — the by-hand effort a
+# team assumes each generated artifact would otherwise have cost. This is a
+# calibration heuristic, NOT a measured number; tune it to your team's real
+# authoring pace before quoting the figure. Override any subset per team in
+# config/projects/{team}/project.yaml under its own `time_saved:` block.
+# (Legacy QF_HOURS_PER_* / QF_MINUTES_PER_TEST env vars still work as a
+# deployment-level fallback when a key is set neither here nor per-project.)
+# Service levels for the dashboard's review-cycle watch (/api/metrics/review-cycle).
+# A PR breaches when it has sat in the state below for longer than its threshold;
+# the dashboard then flags it and sends one Slack nudge per `renudge_hours`.
+# Override any subset per team in config/projects/{team}/project.yaml under
+# its own `review_sla:` block. Draft and approved PRs are never nudged.
+review_sla:
+  enabled: true             # false = do not poll this project at all
+  reviewer_hours: 24        # waiting_reviewer — nobody has (re-)reviewed
+  author_hours: 48          # waiting_author — changes requested, no response
+  ack_hours: 24             # waiting_ack — author answered, nobody followed up
+  stale_days: 5             # no activity of any kind for this long
+  renudge_hours: 24         # minimum gap between nudges for the same PR
+  ignore_logins: []         # bots/service accounts (anything ending in "[bot]" is already ignored)
+  slack_users: {}           # github_login -> Slack member id, for @mentions in nudges
+  watch_repos: []           # org/repo list to poll; empty = the project's primary_repo only
+                            # (additional_repos are NOT polled — upstream repos would flood the view)
+
+time_saved:
+  hours_per_stp: 2.0        # per generated STP
+  hours_per_scenario: 0.5   # per STD scenario (when the STD carries scenario metadata)
+  hours_per_std: 1.5        # flat per-STD fallback when a doc has no scenario metadata
+  minutes_per_test: 20      # per generated test
 
 # Canonical data formats — all agents and skills MUST use these exact values
 canonical_formats:

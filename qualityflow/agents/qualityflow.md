@@ -1,12 +1,8 @@
 ---
 name: qualityflow
-description: >-
-  Unified QualityFlow pipeline agent. Orchestrates the full 7-stage QE
-  pipeline: STP generation, review, refinement, STD generation, review,
-  refinement, and test code generation.
-tools: >-
-  Read, Write, Edit, Glob, Grep, Bash, Agent, LSP
-model: opus
+description: Unified QualityFlow pipeline agent. Orchestrates the full 7-stage QE pipeline: STP generation, review, refinement, STD generation, review, refinement, and test code generation.
+tools: Read, Write, Edit, Glob, Grep, Bash, Agent, LSP
+model: inherit
 skills:
   - project-resolver
   - jira-parser
@@ -43,7 +39,10 @@ single Jira ticket or GitHub issue.
 
 - `FULLSEND_OUTPUT_DIR` — write all output files here
 - `FULLSEND_TARGET_REPO_DIR` — the QualityFlow project directory
-- `SOURCE_REPO_DIR` — source code repository (mounted separately, optional)
+- `SOURCE_REPO_PATH` — source code repository (optional). The variable
+  named by `primary_repo.local_path_env` in `repositories.yaml` wins when it
+  differs; `SOURCE_REPO_DIR` is read only as a fallback (old name).
+  <!-- ponytail: SOURCE_REPO_DIR is the old name, read only as a fallback; drop it once no setup exports it. -->
 - `JIRA_BASE_URL` — Jira instance URL
 - `JIRA_API_TOKEN` — API token for Jira REST calls
 - `JIRA_USER_EMAIL` — email for Jira authentication
@@ -53,6 +52,8 @@ single Jira ticket or GitHub issue.
 - `ISSUE_SOURCE` — `jira` or `github` (defaults to `github` in harness)
 - `REPO_FULL_NAME` — target repo (e.g., `org/repo`)
 - `TARGET_BRANCH` — PR base branch (defaults to `main` in harness)
+- `COVERAGE_MODE` — `auto` (default), or `off` to skip coverage gap analysis
+  entirely. Any other value is treated as `auto`.
 
 ## Important: CLI Instead of MCP
 
@@ -96,13 +97,18 @@ Use `$TICKET_REF` as the ticket identifier everywhere a stage needs one below.
 Invoke the **project-resolver** skill with `$TICKET_REF`.
 
 If `ISSUE_SOURCE` is `github`, the project-resolver will use auto-discovery
-mode (scan `$SOURCE_REPO_DIR` for language markers and test conventions).
+mode (scan `$SOURCE_REPO_PATH` for language markers and test conventions).
 
 Save the returned `project_context` for all subsequent stages.
 
 ### Stage 1: STP Builder
 
 Generate a Software Test Plan from ticket data, PR diffs, and LSP analysis.
+
+**The team's STP comes first.** Before generating, run `commands/stp-builder.md`
+Step 0.5 with the `gh` commands it lists: when the team's design-docs repo already
+has the STP for this ticket, pull it in and use it, and skip generation, review and refinement: continue at Stage 4 (STD Builder) once it is approved.
+
 
 #### 1.1 Jira Data Collection
 
@@ -137,19 +143,68 @@ gh pr diff <number> --repo <owner>/<repo>
 
 Apply the **pr-analyzer** skill. If no PRs found, continue without PR data.
 
+#### 1.2b Coverage Gap Analysis
+
+**Guard:** run only when the trigger is a **pull request** and `COVERAGE_MODE`
+is not `off`. Skip silently otherwise — issue-triggered runs behave exactly as
+before.
+
+The PR's CI already measured which added lines are untested. Read it back
+rather than re-deriving it:
+
+Do not decide "is this a PR" from the URL alone — GitHub numbers issues and
+PRs in one sequence and exposes PRs under `/issues/` too, so
+`$GITHUB_ISSUE_URL` may carry either shape for the same PR. Ask `gh`:
+
+```bash
+PR_NUMBER=""
+if [ "${COVERAGE_MODE:-auto}" != "off" ]; then
+  N="${GITHUB_ISSUE_URL##*/}"
+  # Succeeds only if N is a pull request; plain issues exit non-zero.
+  if [ -n "$N" ] && gh pr view "$N" --repo "$REPO_FULL_NAME" \
+       --json number >/dev/null 2>&1; then
+    PR_NUMBER="$N"
+  fi
+fi
+
+if [ -n "$PR_NUMBER" ]; then
+  HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO_FULL_NAME" \
+               --json headRefOid --jq .headRefOid)
+
+  # Headline patch coverage + gate, from the PR's own coverage check run.
+  gh api "repos/${REPO_FULL_NAME}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+    --jq '.check_runs[] | select(.name|test("(?i)codecov|coverage")) |
+          {name, conclusion, title: .output.title}'
+
+  # Per-file breakdown, from the coverage bot's PR comment.
+  gh api "repos/${REPO_FULL_NAME}/issues/${PR_NUMBER}/comments?per_page=100" \
+    --jq '.[] | select(.user.login|test("(?i)codecov")) | .body'
+fi
+```
+
+Feed `head_sha` and the raw output into the **pr-analyzer** skill and run its
+**Coverage Gap Extraction** procedure. It returns a `coverage_gaps` block.
+
+If no coverage source answers, `coverage_gaps` is absent — continue with the
+pipeline unchanged. Coverage data sharpens the STP; it is never a precondition
+for producing one.
+
 #### 1.3 LSP Analysis
 
 If `project_context.feature_toggles.lsp_analysis` is true and
-`$SOURCE_REPO_DIR` exists with a `go.mod`:
+`$SOURCE_REPO_PATH` exists, follow the **lsp-tracer** skill's Step 0: detect
+Go (`go.mod`, gopls) or Python (`pyproject.toml` / `setup.py` / `setup.cfg` /
+`requirements*.txt`, pyright), then:
 
-1. Verify LSP: `LSP documentSymbol` on `go.mod`
+1. Verify LSP: `LSP documentSymbol` on one `.go` / `.py` source file
 2. Find relevant symbols: `LSP documentSymbol` on changed files
 3. Trace references: `LSP findReferences` on key functions
 4. Trace callers: `LSP incomingCalls` up the call chain
 5. Identify existing test coverage
 
 Make at least 3 LSP tool calls. If LSP is unavailable, fall back to
-grep/read analysis.
+grep/read analysis and print one line, repeated verbatim in your final
+summary: `LSP unavailable (<reason>) — used text search`.
 
 #### 1.4 Source Constants Extraction
 
@@ -166,6 +221,56 @@ Apply skills in sequence:
 3. **tier-classifier** or **test-strategy-resolver** — classify scenarios
 4. **template-engine** — apply the STP template
 5. **table-generator** — format markdown tables
+
+When `coverage_gaps` is present from Step 1.2b, pass it down:
+
+- To **scenario-builder**, as `measured_coverage` on each requirement whose
+  evidence symbol appears in `coverage_gaps.files[].uncovered_symbols`. This
+  is what lets a measured gap override a static `EXISTING_COVERAGE` verdict
+  and attach `coverage_targets` to the scenarios it generates.
+- To **tier-classifier** / **test-strategy-resolver**, as `coverage_signal`
+  (`unit_uncovered`, and `executed_in_env` from `runtime_uncovered` when
+  CoverPort data was merged).
+
+#### 1.5b Coverage Gap Report
+
+When `coverage_gaps` is present, add a **Coverage Gap Report** subsection to
+STP Section II, immediately before the test strategy. Its whole purpose is to
+record the *before* numbers, so a reviewer can re-run the same check after the
+generated tests land and compare.
+
+```markdown
+### Coverage Gap Report
+
+Measured at {measured_at} on `{head_sha}` — source: {source}.
+
+| Metric | Before |
+|--------|--------|
+| Patch coverage | {patch_coverage_pct}% (gate: {target_pct}%) |
+| Uncovered added lines | {uncovered_total} |
+
+| File | Patch % | Uncovered | Scenarios targeting it |
+|------|---------|-----------|------------------------|
+| {file} | {patch_coverage_pct}% | {uncovered_count} | {scenario ids} |
+
+Uncovered symbols: {symbol} (`{file}:{lines}`) → scenario {ids}
+
+_Precision: {line|file}. Re-run the same check on the head SHA after these
+tests merge to measure the delta._
+```
+
+Rules for this section:
+
+- Every number is copied from `coverage_gaps`. Never estimate, never round a
+  measurement into a claim the source did not make.
+- Every uncovered symbol gets a scenario id, or an explicit one-line reason
+  why it has none (for example: generated code, or a error path that cannot
+  be reached from a test). An unexplained gap is a finding, not a silence.
+- Do **not** state an "after" number. The pipeline cannot measure the effect
+  of tests it has not run. Claiming a projected coverage number here is
+  exactly the failure mode this whole mode exists to catch.
+- When `precision: file`, say so and cite files only. Do not print line ranges
+  that were not measured.
 
 #### 1.6 Document Formatting
 
@@ -189,19 +294,20 @@ Review the generated STP against QE quality standards.
 3. Apply **stp-reviewer** skill (7 review dimensions)
 4. Write review report to `outputs/{JIRA_ID}/reviews/{JIRA_ID}_stp_review.md`
 
-If verdict is `APPROVED` or `APPROVED_WITH_FINDINGS`, proceed to Stage 3/4.
-If `NEEDS_REVISION`, proceed to Stage 3 for refinement.
+If the review has 0 critical and 0 major findings, skip to Stage 4.
+Otherwise (critical, or major findings), proceed to Stage 3 for refinement.
 
 ### Stage 3: STP Refiner
 
 If the STP review found issues:
 
 1. Read the review report
-2. Apply each fix (critical and major findings first)
+2. Apply each fix (critical findings first, then major)
 3. Re-validate with **output-validator**
 4. Overwrite the STP file
 
-If review was `APPROVED`, skip this stage.
+Fix critical and major findings; minor findings are not targeted. Skip this
+stage when the review has 0 critical and 0 major findings.
 
 ### Stage 4: STD Builder
 
@@ -235,27 +341,33 @@ Review the STD for traceability and code generation readiness.
 If the STD review found issues:
 
 1. Read the review report
-2. Fix each finding in the STD YAML and stub files
+2. Fix each critical and major finding in the STD YAML and stub files
 3. Re-validate
 
-If review was `APPROVED`, skip this stage.
+Fix critical and major findings; minor findings are not targeted. Skip this
+stage when the review has 0 critical and 0 major findings.
 
 ### Stage 7: Test Generator
 
 Generate working test implementations from the STD.
 
 1. Read the STD YAML from `outputs/{JIRA_ID}/std/`
-2. Invoke the **test-generator** skill
-3. For Go: generate working tests that compile with Bazel
-4. For Python: generate working tests that pass `pytest --collect-only`
+2. Require a checkout of the tests repo (`$SOURCE_REPO_DIR`); without one,
+   stop: the suite's fixtures and helpers would be guessed
+3. Collect the suite's vocabulary with
+   `skills/test-generator/repo_context.py context` and invoke the
+   **test-generator** skill with it (`/generate-tests` Steps 3.5-4)
+4. Verify inside the checkout with `repo_context.py verify` (pytest
+   --setup-plan or Go compile; no test runs) and report `verification` and its reason
 
 The skill drafts tests under `outputs/{JIRA_ID}/`. That is a working
 directory: nothing under `outputs/` is committed. Integrate each test into
 the target repo's existing test suite:
 
 - Put it next to the code under test, following the repo's existing test
-  conventions (naming, package, framework). Keep the `qf_` prefix on new
-  files where the repo's test discovery still picks them up.
+  conventions (naming, package, framework). Name new files
+  `qf_{feature}_test.go` (Go) or `test_qf_{feature}.py` (Python), never
+  `qf_{feature}.py`: pytest's default `python_files` is `test_*.py *_test.py`.
 - Make sure the repo's normal test command runs it. If the repo lists its
   tests explicitly (a Makefile target, CI config), add the file there.
 - If a test cannot be integrated, leave it uncommitted and say so in the
@@ -301,6 +413,13 @@ test_counts:
   total: <count>
 stp_review_verdict: APPROVED
 std_review_verdict: APPROVED
+coverage_gap:                      # omitted entirely when no source answered
+  source: codecov-check
+  head_sha: <sha measured>
+  patch_coverage_before: 28.2
+  uncovered_lines_before: 188
+  scenarios_targeting_gaps: <count>
+  tests_targeting_gaps: <count>
 ```
 
 ## Error Handling
@@ -311,6 +430,7 @@ Each stage has independent failure handling:
 |-------|-----------|--------|
 | Stage 1 (STP Builder) | Jira fetch fails | **Abort** — no data to generate from |
 | Stage 1 (STP Builder) | PR fetch fails | Continue without PR data |
+| Stage 1 (Coverage gap) | No coverage source, or not a PR | Skip the gap report; pipeline continues unchanged |
 | Stage 1 (STP Builder) | LSP fails | Continue without regression data |
 | Stage 2 (STP Reviewer) | Review fails | Skip review, proceed to STD |
 | Stage 3 (STP Refiner) | Refinement fails | Use original STP |

@@ -12,6 +12,9 @@ primary_repo:
   language: "go"                         # Primary language: go, python, etc.
   build_system: "make"                   # Build system: make, bazel, cargo, etc.
   build_command: "make test"             # Command to run tests
+  # verify:                              # optional: what this repo's CI sets to
+  #   env: {MY_SUITE_ARCH: amd64}        # collect tests offline (see config/README.md)
+  #   args: ["--tc-file=tests/config.py"]
 
 # Optional: separate repo for end-to-end tests
 # tier2_repo:
@@ -19,6 +22,7 @@ primary_repo:
 #   org: "my-org"
 #   full_name: "my-org/my-project-e2e"
 #   url: "https://github.com/my-org/my-project-e2e"
+#   local_path_env: "TESTS_REPO_PATH"    # Env var pointing to local clone (/generate-tests needs it)
 #   default_branch: "main"
 #   language: "python"
 
@@ -28,13 +32,20 @@ primary_repo:
 #     org: "my-org"
 #     full_name: "my-org/my-other-repo"
 
-# Optional: fetch specific files from repos at runtime
+# Optional: fetch the target repo's own rules at run time into
+# project_context.repo_rules. The STD skills read agents_rules and std_format;
+# the STP keys (stp_template, ...) are in config/README.md.
 # repo_files:
-#   coding_standards:
+#   agents_rules:
 #     repo: "primary_repo"
-#     path: "CONTRIBUTING.md"
+#     path: "AGENTS.md"
 #     fallback: null
-#     description: "Project coding standards"
+#     description: "Contributor rules: implicit markers, fixtures, forbidden constructs"
+#   std_format:
+#     repo: "primary_repo"
+#     path: "docs/STD_GUIDE.md"
+#     fallback: null
+#     description: "How test descriptions and stub docstrings are written"
 
 pr_url_patterns:
   - "https://github.com/{org}/{repo}/pull/{number}"

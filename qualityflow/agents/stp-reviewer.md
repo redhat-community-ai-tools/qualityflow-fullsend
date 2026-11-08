@@ -1,11 +1,8 @@
 ---
 name: stp-reviewer
-description: >-
-  Review a generated STP document for QE quality, rule compliance,
-  and requirement coverage. Fetches Jira data for comparison.
-tools: >-
-  Read, Write, Edit, Glob, Grep, Bash
-model: opus
+description: Review a generated STP document for QE quality, rule compliance, and requirement coverage. Fetches Jira data for comparison.
+tools: Read, Write, Glob, Grep, Bash
+model: inherit
 skills:
   - project-resolver
   - review-rules-extractor
@@ -102,7 +99,7 @@ data fetched in Step 2. If the STP says "Requirements reviewed: Done" but
 acceptance criteria are missing from Section III, that is a CRITICAL finding.
 
 Review across 7 weighted dimensions:
-1. Rule Compliance (A-P) — 25%
+1. Rule Compliance (Rules A–Q) — 25%
 2. Requirement Coverage — 30%
 3. Scenario Quality — 15%
 4. Risk & Limitation Accuracy — 10%

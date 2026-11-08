@@ -17,6 +17,13 @@ The user has provided: `$ARGUMENTS`
 This should be a Jira ticket ID (e.g., `PROJ-123`, `PROJ-789`) for which an STD
 has already been generated.
 
+Split `$ARGUMENTS` on whitespace: tokens starting with `--` are flags, the remaining
+token is the Jira ID. Pass only the Jira ID to project-resolver — never the flags.
+
+This command reviews the document **as it is on disk now** — including a manual
+edit made after an earlier review — and does not write `approvals.yaml`; its only
+state write is Step 7b.
+
 ## Workflow
 
 ### Step 0: Resolve Project
@@ -26,7 +33,7 @@ Use the Skill tool to invoke the project-resolver skill:
 **Tool:** Skill
 **Parameters:**
 - skill: "project-resolver"
-- args: "$ARGUMENTS"
+- args: "{JIRA_ID}" (the Jira ID token from `$ARGUMENTS`, flags stripped)
 
 This returns `project_context` containing:
 - `project_id`, `display_name`, `jira_id`
@@ -185,6 +192,31 @@ outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_review.md
 ```
 
 Use the Write tool to save the report.
+
+### Step 7b: Update Pipeline State
+
+Record the review outcome so the state file (and dashboard) always match the
+saved report — a standalone re-review that skips this leaves a stale verdict
+on record:
+
+**Tool:** Skill
+**Parameters:**
+- skill: "pipeline-state"
+- args: "complete-phase {JIRA_ID} std_review"
+
+Pass the review outcome via `--output` and `--extra`:
+```yaml
+output: "outputs/{JIRA_ID}/reviews/{JIRA_ID}_std_review.md"
+verdict: {APPROVED | APPROVED_WITH_FINDINGS | NEEDS_REVISION}
+findings:
+  critical: {X}
+  major: {Y}
+  minor: {Z}
+```
+
+If the review itself **fails** (no report produced), use:
+- skill: "pipeline-state"
+- args: "fail-phase {JIRA_ID} std_review --error '{message}'"
 
 ### Step 8: Report to User
 

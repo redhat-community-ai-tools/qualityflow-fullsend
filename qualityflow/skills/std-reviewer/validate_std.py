@@ -1,0 +1,1101 @@
+#!/usr/bin/env python3
+"""QualityFlow STD mechanical validator.
+
+Deterministic replacement for the LLM-performed count, set-difference and
+grep checks in the std-reviewer skill. Validates the STD YAML, its
+traceability to the source STP, and the generated stub files.
+
+Usage:
+    python3 skills/std-reviewer/validate_std.py <std_yaml> \
+        [--stp <stp_file>] [--stubs DIR ...] [--priority P0] [--polarion-lint] [--yaml]
+    python3 skills/std-reviewer/validate_std.py --scenarios <scenario_list_yaml>
+
+The second form validates a scenario list feeding std-builder when there is
+no STP (std-orchestrator Step 1B), before it becomes an STD.
+
+The STP defaults to document_metadata.stp_reference.file and the stub dirs
+to the *-tests/ directories next to the STD YAML, so the common case is
+just the one positional argument.
+
+Exit codes: 0 = no errors (warnings allowed), 1 = at least one error,
+2 = usage / file problem.
+
+NOT covered here (LLM judgment, per SKILL.md): whether an Expected is
+measurable, whether Steps smuggle in verification, whether a scenario
+meaningfully matches its STP row, pattern correctness, PSE wording quality.
+"""
+
+import argparse
+import ast
+import glob
+import os
+import re
+import sys
+
+import yaml
+
+TEST_ID = re.compile(r"^TS-(?P<jira>[A-Z][A-Z0-9]*-\d+)-(?P<num>\d{3})$")
+STP_REQ_ENTRY = re.compile(r"^\s*- \*\*\[([^\]]+)\]\*\*")
+STP_SCENARIO = re.compile(r"^\s*- \*Test Scenario:\*")
+SCENARIO_LABEL = re.compile(r"\*\*(TS-[A-Za-z0-9-]*?(\d+))\*\*")
+TRAILING_NUM = re.compile(r"(\d+)\s*$")
+GO_TEST_START = re.compile(r"^\s*(?:PendingIt|FIt|It|t\.Run)\s*\(", re.M)
+GO_TEST_ID = re.compile(r"\[test_id:([^\]]+)\]")
+# A Python stub's id is the docstring tag (same pattern as ui.py's traceability scan).
+PY_TEST_ID = re.compile(r"\[(?:test_id:)?(TS-[A-Za-z0-9-]+)\]")
+PSE = ("Preconditions:", "Steps:", "Expected:")
+# An STD built from a Jira ticket alone (bug fixes, smaller features) has no STP,
+# and then the reference line is the Jira link instead.
+REFERENCE = ("STP:", "Jira:")
+# A migrated case's Polarion id, listed under the stub docstring's Markers:.
+MARKERS_POLARION = re.compile(r"""^\s*-\s*polarion\(\s*["']([^"']+)["']\s*\)\s*$""", re.M)
+REFERENCE_LINE = re.compile(r"^\s*(STP|Jira):", re.M)
+# What each missing source section is called in a stub's Source: line.
+SOURCE_WORDS = {"preconditions": "precondition", "steps": "step", "expected": "expected"}
+# A live polarion marker with a real id, matched case-insensitively: a repo's
+# sync job can mark the case Automated from such a merged line, and a design
+# stub is not automated.
+LIVE_POLARION = re.compile(r"pytest.mark.polarion.*?[A-Z][A-Z0-9_]*-[0-9]+", re.I)
+PRIORITIES = {"P0", "P1", "P2"}
+COVERAGE_STATUS = {"NEW", "PARTIAL_COVERAGE", "EXISTING_COVERAGE"}
+TYPE_COUNT_KEYS = {"unit": "unit_count", "functional": "functional_count",
+                   "integration": "integration_count", "e2e": "e2e_count"}
+# flake8's own inline-noqa syntax, narrowed to the PolarionIds code.
+PID_NOQA = re.compile(r"# noqa:[\sA-Z0-9,]*\bPID001\b", re.I)
+
+
+class Report:
+    def __init__(self):
+        self.checks = {}
+        self.errors = []
+        self.warnings = []
+
+    def ok(self, name):
+        self.checks.setdefault(name, "pass")
+
+    def warn(self, name, msg):
+        self.checks.setdefault(name, "pass")
+        if self.checks[name] == "pass":
+            self.checks[name] = "warn"
+        self.warnings.append("[%s] %s" % (name, msg))
+
+    def fail(self, name, msg):
+        self.checks[name] = "fail"
+        self.errors.append("[%s] %s" % (name, msg))
+
+
+def req_ids(scenario):
+    ids = scenario.get("requirement_ids") or []
+    if isinstance(ids, str):
+        ids = [ids]
+    one = scenario.get("requirement_id")
+    if one and one not in ids:
+        ids = list(ids) + [one]
+    return [i for i in ids if i]
+
+
+# ------------------------------------------------------------------ STD YAML
+
+def check_metadata(std, rep, base_dir):
+    meta = std.get("document_metadata") or {}
+    # No STP (a scenario-list input): the Jira link stands in for stp_reference.
+    for aliases in (("jira_id", "jira_issue"), ("title", "jira_summary"),
+                    ("stp_reference", "jira_url")):
+        if not any(meta.get(a) for a in aliases):
+            rep.fail("metadata.required_fields",
+                     "document_metadata.%s is missing or empty" % " / ".join(aliases))
+    rep.ok("metadata.required_fields")
+
+    ref = meta.get("stp_reference")
+    if not ref:
+        return meta
+    ref_file = ref.get("file") if isinstance(ref, dict) else ref
+    if not ref_file:
+        rep.fail("metadata.stp_reference_exists",
+                 "stp_reference has no file path")
+    elif not resolve(ref_file, base_dir):
+        rep.fail("metadata.stp_reference_exists",
+                 "stp_reference.file does not exist: %s" % ref_file)
+    else:
+        rep.ok("metadata.stp_reference_exists")
+    return meta
+
+
+def check_counts(meta, scenarios, rep):
+    """Every *_count in the metadata must match the scenario array."""
+    actual = {"total_scenarios": len(scenarios)}
+    for p in sorted(PRIORITIES):
+        actual["%s_count" % p.lower()] = sum(
+            1 for s in scenarios if s.get("priority") == p)
+    actual["existing_coverage_count"] = sum(
+        1 for s in scenarios if s.get("coverage_status") == "EXISTING_COVERAGE")
+    actual["new_count"] = len(scenarios) - actual["existing_coverage_count"]
+
+    types = [str(s.get("test_type", "")).strip().lower() for s in scenarios]
+    if all(t in TYPE_COUNT_KEYS for t in types):
+        for t, key in TYPE_COUNT_KEYS.items():
+            actual[key] = types.count(t)
+    elif any(meta.get(k) is not None for k in TYPE_COUNT_KEYS.values()):
+        rep.warn("metadata.counts_match",
+                 "unrecognized test_type values %s — per-type counts not verified"
+                 % sorted(set(types) - set(TYPE_COUNT_KEYS)))
+
+    for key, value in actual.items():
+        declared = meta.get(key)
+        if declared is not None and declared != value:
+            rep.fail("metadata.counts_match",
+                     "%s declares %s, scenarios contain %d" % (key, declared, value))
+
+    tier_counts = meta.get("tier_counts")
+    if isinstance(tier_counts, dict) and tier_counts:
+        for tier, declared in tier_counts.items():
+            value = sum(1 for s in scenarios
+                        if str(s.get("tier", "")).startswith(str(tier)))
+            if declared != value:
+                rep.fail("metadata.counts_match",
+                         "tier_counts[%s] declares %s, scenarios contain %d"
+                         % (tier, declared, value))
+    rep.ok("metadata.counts_match")
+
+
+def check_scenarios(meta, scenarios, rep):
+    if not scenarios:
+        rep.fail("scenarios.present", "STD has no scenarios")
+        return
+    rep.ok("scenarios.present")
+
+    jira_id = meta.get("jira_id") or meta.get("jira_issue")
+    seen_test, seen_scenario = {}, {}
+    for i, s in enumerate(scenarios):
+        where = s.get("test_id") or s.get("scenario_id") or "scenario #%d" % (i + 1)
+
+        for field in ("test_id", "priority", "test_objective",
+                      "test_steps", "assertions"):
+            if not s.get(field):
+                rep.fail("scenarios.required_fields",
+                         "%s: %s is missing or empty" % (where, field))
+        # A test type (auto mode) or a tier (tier mode, or auto mode with the
+        # project's scenario_tiers, e.g. Tier 1/2/3) classifies it.
+        if not (s.get("test_type") or s.get("tier")):
+            rep.fail("scenarios.required_fields",
+                     "%s: needs test_type or tier" % where)
+        if not req_ids(s):
+            rep.fail("scenarios.required_fields",
+                     "%s: no requirement_id / requirement_ids" % where)
+
+        tid = s.get("test_id")
+        if tid:
+            m = TEST_ID.match(str(tid))
+            if not m:
+                rep.fail("scenarios.test_id_format",
+                         "%s: test_id is not TS-{JIRA}-{NNN}" % where)
+            elif jira_id and m.group("jira") != jira_id:
+                rep.fail("scenarios.test_id_format",
+                         "%s: test_id carries %s but the STD is %s"
+                         % (where, m.group("jira"), jira_id))
+            if tid in seen_test:
+                rep.fail("scenarios.unique_ids", "duplicate test_id %s" % tid)
+            seen_test[tid] = True
+        sid = s.get("scenario_id")
+        if sid is not None:
+            if sid in seen_scenario:
+                rep.fail("scenarios.unique_ids", "duplicate scenario_id %s" % sid)
+            seen_scenario[sid] = True
+
+        if s.get("priority") not in PRIORITIES:
+            rep.fail("scenarios.priority_values",
+                     "%s: priority %r is not one of %s"
+                     % (where, s.get("priority"), sorted(PRIORITIES)))
+        cov = s.get("coverage_status")
+        if cov is not None and cov not in COVERAGE_STATUS:
+            rep.fail("scenarios.coverage_status_values",
+                     "%s: coverage_status %r is not one of %s"
+                     % (where, cov, sorted(COVERAGE_STATUS)))
+
+        steps = s.get("test_steps") or {}
+        if not (isinstance(steps, dict) and steps.get("test_execution")):
+            rep.fail("scenarios.test_execution_present",
+                     "%s: test_steps.test_execution is empty" % where)
+
+    for name in ("scenarios.required_fields", "scenarios.test_id_format",
+                 "scenarios.unique_ids", "scenarios.priority_values",
+                 "scenarios.coverage_status_values",
+                 "scenarios.test_execution_present"):
+        rep.ok(name)
+
+
+# --------------------------------------------------------------- STP tracing
+
+def parse_stp(text):
+    """Section III requirement ids and the count of test-scenario bullets."""
+    def heading(line):
+        """(level, text) for a markdown heading, else None."""
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            return None
+        level = len(stripped) - len(stripped.lstrip("#"))
+        return level, stripped.lstrip("#").strip().strip("*").strip().lower()
+
+    def is_section_iii(txt):
+        return txt.startswith("section iii") or re.match(r"iii[.:) ]", txt)
+
+    lines = text.splitlines()
+    start = level = None
+    for i, line in enumerate(lines):
+        h = heading(line)
+        if h and is_section_iii(h[1]):
+            start, level = i, h[0]
+            break
+    if start is None:
+        return None, 0, {}
+    ids, bullets, labels = [], 0, {}
+    cols, current = None, None  # table layout: column indexes, last requirement id
+    for line in lines[start + 1:]:
+        h = heading(line)
+        if h and h[0] <= level and not is_section_iii(h[1]):
+            break
+        m = STP_REQ_ENTRY.match(line)
+        if m:
+            ids.append(m.group(1).strip())
+        elif STP_SCENARIO.match(line):
+            bullets += 1
+            label = SCENARIO_LABEL.search(line)
+            if label:
+                labels[int(label.group(2))] = label.group(1)
+        elif line.strip().startswith("|"):
+            # The table layout the design-docs rules also accept:
+            # | Requirement ID | Requirement Summary | Test Scenario(s) | Tier | Priority |
+            # A blank Requirement ID cell continues the row above.
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            low = [c.lower() for c in cells]
+            if cols is None:
+                req = next((i for i, c in enumerate(low) if "requirement id" in c), None)
+                scen = next((i for i, c in enumerate(low) if "test scenario" in c), None)
+                if req is not None and scen is not None:
+                    cols = (req, scen)
+                continue
+            if all(set(c) <= set(":- ") for c in cells):
+                continue  # the |:---| separator row
+            req = cells[cols[0]] if cols[0] < len(cells) else ""
+            req = re.sub(r"\]\([^)]*\)", "]", req).strip(" *[]`")
+            if req:
+                current = req
+                ids.append(req)
+            scen = cells[cols[1]] if cols[1] < len(cells) else ""
+            if scen and current:
+                bullets += 1
+                label = SCENARIO_LABEL.search(scen)
+                if label:
+                    labels[int(label.group(2))] = label.group(1)
+    return list(dict.fromkeys(ids)), bullets, labels
+
+
+def scenario_number(s):
+    """STP scenario number a scenario claims: stp_scenario_id, else test_id."""
+    for value in (s.get("stp_scenario_id"), s.get("test_id")):
+        m = TRAILING_NUM.search(str(value or ""))
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def check_traceability(stp_text, scenarios, rep):
+    stp_ids, bullets, labels = parse_stp(stp_text)
+    if stp_ids is None:
+        rep.warn("traceability.stp_requirements_covered",
+                 "no Section III found in the STP — traceability not verified")
+        return
+    if not stp_ids:
+        # Section III exists but in a layout this parser does not know. Saying
+        # "not verified" beats reporting every STD scenario as an orphan.
+        rep.warn("traceability.stp_requirements_covered",
+                 "Section III has no requirement entries this validator can read "
+                 "(neither '- **[ID]**' bullets nor a Requirement ID table) — "
+                 "traceability not verified")
+        return
+    covered = {r for s in scenarios for r in req_ids(s)}
+
+    missing = [i for i in stp_ids if i not in covered]
+    if missing:
+        rep.fail("traceability.stp_requirements_covered",
+                 "STP requirements with no STD scenario: %s" % ", ".join(missing))
+    rep.ok("traceability.stp_requirements_covered")
+
+    orphans = sorted(covered - set(stp_ids))
+    if orphans:
+        rep.fail("traceability.no_orphan_scenarios",
+                 "STD requirement ids absent from the STP: %s" % ", ".join(orphans))
+    rep.ok("traceability.no_orphan_scenarios")
+
+    if bullets and bullets != len(scenarios):
+        rep.warn("traceability.scenario_counts",
+                 "STP lists %d test scenarios, STD has %d" % (bullets, len(scenarios)))
+    rep.ok("traceability.scenario_counts")
+
+    # When the STP numbers its scenarios, the mapping is checkable row by row.
+    if labels:
+        claimed = {scenario_number(s) for s in scenarios} - {None}
+        missing = [labels[n] for n in sorted(set(labels) - claimed)]
+        if missing:
+            rep.fail("traceability.stp_scenarios_covered",
+                     "STP scenarios with no STD scenario: %s" % ", ".join(missing))
+        unknown = sorted(claimed - set(labels))
+        if unknown:
+            rep.fail("traceability.stp_scenarios_covered",
+                     "STD scenarios claim STP rows that do not exist: %s"
+                     % ", ".join("#%d" % n for n in unknown))
+        rep.ok("traceability.stp_scenarios_covered")
+
+
+# --------------------------------------------------------------------- stubs
+
+def markers_block(doc):
+    """The entries of a docstring's Markers: section, up to the next section."""
+    out, inside = [], False
+    for line in doc.splitlines():
+        if re.match(r"\s*Markers:\s*$", line):
+            inside = True
+        elif inside and re.match(r"\s*[A-Z][A-Za-z ]*:", line):
+            break
+        elif inside:
+            out.append(line)
+    return "\n".join(out)
+
+
+def source_problem(doc, scenario):
+    """Why a stub's Source: line does not cover what its source lacked, or None."""
+    missing = scenario.get("source_missing") or []
+    need = scenario.get("source_pse") in ("partial", "missing") or missing or scenario.get("review_note")
+    if not need:
+        return None
+    note, inside = [], False
+    for line in doc.splitlines():  # the Source: line and any lines it wraps onto
+        if re.match(r"\s*Source:", line):
+            inside = True
+            note.append(line.split("Source:", 1)[1])
+        elif inside and line.strip() and not re.match(r"\s*[A-Z][A-Za-z ]*:", line):
+            note.append(line)
+        else:
+            inside = False
+    note = " ".join(note).lower()
+    if not note.strip():
+        if missing or scenario.get("source_pse") in ("partial", "missing"):
+            return "needs a `Source:` line naming the sections its source lacked (proposed)"
+        return "needs a `Source:` line saying the steps were corrected in team review"
+    if missing:
+        # stub-generator's sentence: "Polarion PROJ-1 lists no steps; the Steps below are proposed."
+        said = re.search(r"\b(?:lists|has|gives) no ([^;.]*)[;.][^.]*\bpropos", note)
+        absent = [SOURCE_WORDS[m] for m in missing
+                  if SOURCE_WORDS.get(m) and not (said and SOURCE_WORDS[m] in said.group(1))]
+        if absent:
+            return ("its `Source:` line must say the source lists no %s and that they are proposed, e.g. "
+                    "\"Source: Polarion PROJ-1 lists no steps; the Steps below are proposed.\"" % ", ".join(absent))
+    if scenario.get("review_note") and "review" not in note:
+        return "its `Source:` line does not say the steps were corrected in team review"
+    return None
+
+
+def links_jira(text, url):
+    """True when a line is exactly 'Jira: {url}' (comment markers allowed).
+
+    A trailing '# ...' comment is allowed too: a tests repo's link checker may
+    want one, e.g. '# <skip-link-check>' for a closed Jira.
+    """
+    return re.search(r"^[\s/*]*Jira:\s*%s(?:\s+#.*)?\s*$" % re.escape(url), text, re.M) is not None
+
+
+def python_stubs(path, text, rep, by_id):
+    """Returns the test ids found. Flags marker, PSE and body problems."""
+    name = os.path.basename(path)
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as e:
+        rep.fail("stubs.parse", "%s: %s" % (name, e))
+        return []
+    rep.ok("stubs.parse")
+
+    module_doc = ast.get_docstring(tree) or ""
+    if not any(r in module_doc for r in REFERENCE):
+        rep.fail("stubs.module_reference",
+                 "%s: module docstring has no STP: or Jira: line" % name)
+    if "__test__ = False" not in text:
+        rep.fail("stubs.collection_disabled",
+                 "%s: no __test__ = False — stubs would be collected" % name)
+    live = LIVE_POLARION.search(text)
+    if live:
+        rep.fail("stubs.polarion_marker",
+                 "%s: `%s` on a design stub would mark its Polarion case Automated on merge; "
+                 "list the id under Markers: instead" % (name, live.group(0)))
+
+    ids = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test"):
+            continue
+        where = "%s::%s" % (name, node.name)
+
+        # __test__ = False does not stop pytest importing the module, and the
+        # import runs every decorator: an unregistered mark fails collection
+        # under --strict-markers. Phase 2 adds it.
+        if any("qf_test_id" in ast.unparse(d) for d in node.decorator_list):
+            rep.fail("stubs.qf_test_id_marker",
+                     "%s: @pytest.mark.qf_test_id on a stub fails `pytest --collect-only` "
+                     "in a --strict-markers repo that does not register it; the "
+                     "docstring [TS-...] tag is the id" % where)
+
+        doc = ast.get_docstring(node) or ""
+        if not doc:
+            rep.fail("stubs.pse_sections", "%s: no docstring" % where)
+            continue
+        own = PY_TEST_ID.findall(doc)[:1]
+        if not own:
+            rep.fail("stubs.test_id_tag", "%s: docstring has no [TS-...] tag" % where)
+        ids += own
+        for tid in own:
+            pid = by_id.get(tid, {}).get("polarion_id")
+            if pid and pid not in MARKERS_POLARION.findall(markers_block(doc)):
+                rep.fail("stubs.polarion_marker",
+                         '%s: no `- polarion("%s")` under its docstring Markers:' % (where, pid))
+            problem = source_problem(doc, by_id.get(tid, {}))
+            if problem:
+                rep.fail("stubs.source_note", "%s: %s" % (where, problem))
+        missing = [s for s in PSE if s not in doc]
+        # Every test states its own Preconditions, Steps and Expected.
+        if missing:
+            rep.fail("stubs.pse_sections",
+                     "%s: docstring is missing %s" % (where, ", ".join(missing)))
+        refs = REFERENCE_LINE.findall(doc)
+        if not refs:
+            rep.fail("stubs.per_test_reference",
+                     "%s: docstring has no STP: or Jira: line" % where)
+        elif len(refs) > 1:
+            rep.fail("stubs.per_test_reference",
+                     "%s: docstring has %d STP:/Jira: lines; a test carries exactly one"
+                     % (where, len(refs)))
+        for tid in own:
+            url = by_id.get(tid, {}).get("jira_url")
+            if url and not links_jira(doc, url):
+                rep.fail("stubs.per_test_reference",
+                         "%s: docstring does not link its own requirement, Jira: %s"
+                         % (where, url))
+
+        body = [n for n in node.body
+                if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+                        and isinstance(n.value.value, str))
+                and not isinstance(n, ast.Pass)]
+        if body:
+            rep.fail("stubs.no_implementation",
+                     "%s: body contains %d statement(s) beyond the docstring"
+                     % (where, len(body)))
+
+    for check in ("stubs.module_reference", "stubs.collection_disabled",
+                  "stubs.qf_test_id_marker", "stubs.test_id_tag", "stubs.pse_sections",
+                  "stubs.per_test_reference", "stubs.no_implementation"):
+        rep.ok(check)
+    return ids
+
+
+def go_stubs(path, text, rep, by_id):
+    name = os.path.basename(path)
+    starts = [m.start() for m in GO_TEST_START.finditer(text)]
+    header = text[:starts[0]] if starts else text
+    if not any(r in header for r in REFERENCE):
+        rep.fail("stubs.module_reference",
+                 "%s: file header has no STP: or Jira: line" % name)
+    if starts and "PendingIt" not in text and "Skip(" not in text:
+        rep.fail("stubs.collection_disabled",
+                 "%s: no PendingIt/Skip — stubs would execute" % name)
+
+    ids = []
+    bounds = starts + [len(text)]
+    for i, start in enumerate(starts):
+        block = text[bounds[i - 1]:start] if i else text[:start]
+        call = text[start:bounds[i + 1]]
+        found = GO_TEST_ID.search(call)
+        where = "%s::%s" % (name, found.group(1) if found else "test #%d" % (i + 1))
+        if found:
+            ids.append(found.group(1))
+        missing = [s for s in PSE if s not in block]
+        if missing:
+            rep.fail("stubs.pse_sections",
+                     "%s: comment block is missing %s" % (where, ", ".join(missing)))
+        if not any(r in block for r in REFERENCE):
+            rep.fail("stubs.per_test_reference",
+                     "%s: comment block has no STP: or Jira: line" % where)
+        url = by_id.get(found.group(1), {}).get("jira_url") if found else None
+        if url and not links_jira(block, url):
+            rep.fail("stubs.per_test_reference",
+                     "%s: comment block does not link its own requirement, Jira: %s"
+                     % (where, url))
+    if starts and not ids:
+        rep.warn("stubs.coverage",
+                 "%s: no [test_id:...] labels — stub coverage not verified" % name)
+
+    for check in ("stubs.module_reference", "stubs.collection_disabled",
+                  "stubs.pse_sections", "stubs.per_test_reference"):
+        rep.ok(check)
+    return ids
+
+
+def check_stubs(dirs, scenarios, rep, priority=None):
+    files = []
+    for d in dirs:
+        files += sorted(glob.glob(os.path.join(d, "**", "*stubs*.py"), recursive=True))
+        files += sorted(glob.glob(os.path.join(d, "**", "*stubs*.go"), recursive=True))
+    files = [f for f in files if "__pycache__" not in f]
+    if not files:
+        rep.warn("stubs.present", "no stub files found in %s" % (dirs or "(none)"))
+        return
+    rep.ok("stubs.present")
+
+    # A migrated case links its own Jira requirement and keeps its Polarion id.
+    by_id = {s["test_id"]: s for s in scenarios if s.get("test_id")}
+    found = []
+    for path in files:
+        text = open(path, encoding="utf-8").read()
+        found += (python_stubs if path.endswith(".py") else go_stubs)(path, text, rep, by_id)
+    if any(s.get("polarion_id") for s in scenarios):
+        rep.ok("stubs.polarion_marker")
+    if any(s.get("source_pse") in ("partial", "missing") or s.get("source_missing")
+           or s.get("review_note") for s in scenarios):
+        rep.ok("stubs.source_note")
+
+    expected = {s["test_id"] for s in scenarios
+                if s.get("test_id")
+                and s.get("coverage_status") != "EXISTING_COVERAGE"
+                and (priority is None or s.get("priority") == priority)}
+    found_set = set(found)
+    if len(found) != len(found_set):
+        dupes = sorted({i for i in found_set if found.count(i) > 1})
+        rep.fail("stubs.coverage", "test ids used by more than one stub: %s"
+                 % ", ".join(dupes))
+    missing = sorted(expected - found_set)
+    if missing:
+        rep.fail("stubs.coverage", "scenarios with no stub: %s" % ", ".join(missing))
+    orphans = sorted(found_set - expected)
+    if orphans:
+        rep.fail("stubs.coverage", "stubs with no STD scenario: %s" % ", ".join(orphans))
+    rep.ok("stubs.coverage")
+
+
+def check_polarion_lint(dirs, rep):
+    """`# noqa: PID001` on every Python stub's def line (feature toggle polarion_lint).
+
+    The tests repo's flake8 PolarionIds plugin fails every test without
+    @pytest.mark.polarion, stubs included. It reports at the def line, so a
+    noqa on a decorator line suppresses nothing.
+    """
+    for d in dirs:
+        for path in sorted(glob.glob(os.path.join(d, "**", "*stubs*.py"), recursive=True)):
+            text = open(path, encoding="utf-8").read()
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                continue  # stubs.parse reports it
+            lines = text.split("\n")  # ast's numbering; splitlines() also splits on \x85,
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name.startswith("test") \
+                        and not PID_NOQA.search(lines[node.lineno - 1]):
+                    rep.fail("stubs.polarion_lint",
+                             "%s::%s: def line has no `# noqa: PID001`; the tests repo's "
+                             "flake8 PolarionIds plugin fails a test without "
+                             "@pytest.mark.polarion, stubs included"
+                             % (os.path.basename(path), node.name))
+    rep.ok("stubs.polarion_lint")
+
+
+def check_stub_marks(dirs, marks, rep):
+    """Every Python stub test carries `@pytest.mark.<m>` for each project stub_marks entry."""
+    for d in dirs:
+        for path in sorted(glob.glob(os.path.join(d, "**", "*stubs*.py"), recursive=True)):
+            try:
+                tree = ast.parse(open(path, encoding="utf-8").read())
+            except SyntaxError:
+                continue  # stubs.parse reports it
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name.startswith("test"):
+                    have = {ast.unparse(d).split("(")[0].split(".")[-1] for d in node.decorator_list}
+                    for m in marks:
+                        if m not in have:
+                            rep.fail("stubs.stub_marks",
+                                     "%s::%s: no @pytest.mark.%s (project stub_marks)"
+                                     % (os.path.basename(path), node.name, m))
+    rep.ok("stubs.stub_marks")
+
+
+# ------------------------------------------------------- scenario list input
+
+def validate_scenarios(doc):
+    """A scenario list feeding std-builder when there is no STP.
+
+    Format: std-orchestrator Step 1B. Checked here so a malformed import
+    fails before it becomes an STD.
+    """
+    rep = Report()
+    ctx = doc.get("context") or {}
+    if not isinstance(ctx, dict):
+        rep.fail("input.context", "context must be a mapping")
+        ctx = {}
+    for field in ("jira_id", "title", "jira_url"):
+        if not ctx.get(field):
+            rep.fail("input.context", "context.%s is missing or empty" % field)
+    rep.ok("input.context")
+
+    scenarios = doc.get("scenarios")
+    if not scenarios or not isinstance(scenarios, list):
+        rep.fail("input.scenarios_present", "no scenarios")
+        return rep
+    rep.ok("input.scenarios_present")
+
+    seen, seen_polarion = set(), set()
+    for i, s in enumerate(scenarios):
+        if not isinstance(s, dict):
+            rep.fail("input.scenario_fields", "scenario #%d is not a mapping" % (i + 1))
+            continue
+        where = s.get("scenario_id") or s.get("external_id") or "#%d" % (i + 1)
+        for field in ("scenario_id", "requirement_id", "description", "priority"):
+            if not s.get(field):
+                rep.fail("input.scenario_fields",
+                         "scenario %s: %s is missing or empty" % (where, field))
+        if not (s.get("test_type") or s.get("tier")):
+            rep.fail("input.scenario_fields",
+                     "scenario %s: needs test_type (auto mode) or tier (tier mode)" % where)
+        if s.get("priority") and s["priority"] not in PRIORITIES:
+            rep.fail("input.priority_values",
+                     "scenario %s: priority %r is not one of %s"
+                     % (where, s["priority"], sorted(PRIORITIES)))
+        cov = s.get("coverage_status")
+        if cov is not None and cov not in COVERAGE_STATUS:
+            rep.fail("input.coverage_status_values",
+                     "scenario %s: coverage_status %r is not one of %s"
+                     % (where, cov, sorted(COVERAGE_STATUS)))
+        sid = s.get("scenario_id")
+        if sid is not None:
+            if sid in seen:
+                rep.fail("input.unique_ids", "duplicate scenario_id %s" % sid)
+            seen.add(sid)
+        for field in ("preconditions", "steps", "expected"):
+            if field in s and not isinstance(s[field], list):
+                rep.fail("input.scenario_fields",
+                         "scenario %s: %s must be a list" % (where, field))
+        url = s.get("jira_url")
+        if url is not None and not str(url).startswith(("http://", "https://")):
+            rep.fail("input.scenario_fields",
+                     "scenario %s: jira_url %r is not a URL" % (where, url))
+        if "polarion_id" in s:
+            pid = s["polarion_id"]
+            if not pid:
+                rep.fail("input.scenario_fields", "scenario %s: polarion_id is empty" % where)
+            elif pid in seen_polarion:
+                rep.fail("input.unique_ids", "duplicate polarion_id %s" % pid)
+            seen_polarion.add(pid)
+
+    for name in ("input.scenario_fields", "input.priority_values",
+                 "input.coverage_status_values", "input.unique_ids"):
+        rep.ok(name)
+    return rep
+
+
+# ---------------------------------------------------------------------- glue
+
+def resolve(path, base_dir):
+    """STD paths are written repo-root-relative; accept either anchor."""
+    for candidate in (path, os.path.join(base_dir, path)):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def validate(std, base_dir, stp_text=None, stub_dirs=(), priority=None, polarion_lint=False,
+             stub_marks=()):
+    rep = Report()
+    scenarios = std.get("scenarios") or []
+    meta = check_metadata(std, rep, base_dir)
+    check_counts(meta, scenarios, rep)
+    check_scenarios(meta, scenarios, rep)
+    if stp_text is not None:
+        check_traceability(stp_text, scenarios, rep)
+    check_stubs(list(stub_dirs), scenarios, rep, priority)
+    if polarion_lint:
+        check_polarion_lint(stub_dirs, rep)
+    if stub_marks:
+        check_stub_marks(stub_dirs, stub_marks, rep)
+    return rep
+
+
+def render(rep, as_yaml):
+    failed = sum(1 for v in rep.checks.values() if v == "fail")
+    doc = {
+        "validation_results": {
+            "valid": failed == 0,
+            "checks": {k: ("pass" if v == "pass" else v.upper())
+                       for k, v in sorted(rep.checks.items())},
+            "errors": rep.errors,
+            "warnings": rep.warnings,
+        },
+        "total_checks": len(rep.checks),
+        "passed": sum(1 for v in rep.checks.values() if v == "pass"),
+        "failed": failed,
+        "warnings": len(rep.warnings),
+    }
+    if as_yaml:
+        yaml.safe_dump(doc, sys.stdout, default_flow_style=False, sort_keys=False)
+    else:
+        for k, v in sorted(rep.checks.items()):
+            print("%-45s %s" % (k, "PASS" if v == "pass" else v.upper()))
+        for e in rep.errors:
+            print("ERROR: " + e)
+        for w in rep.warnings:
+            print("WARNING: " + w)
+        print("total=%d passed=%d failed=%d warnings=%d"
+              % (doc["total_checks"], doc["passed"], failed, len(rep.warnings)))
+    return failed
+
+
+# ----------------------------------------------------------------- self-test
+
+GOOD_STUB = '''"""
+Feature Tests
+
+STP: stp.md
+Jira: PROJ-1
+"""
+
+
+class TestFeature:
+    """Tests."""
+    __test__ = False
+
+    def test_one(self):
+        """
+        Test that one thing happens. [TS-PROJ-1-001]
+
+        STP: stp.md
+
+        Preconditions:
+            - A running thing
+
+        Steps:
+            1. Do it
+
+        Expected:
+            - It happened
+        """
+'''
+
+GOOD_STP = """## Section III: Test Scenarios & Traceability
+
+- **[REQ-1]** — A requirement.
+  - *Test Scenario:* **TS-PROJ-1-001**: Verify the thing — **Category:** Functional — **Priority:** P0
+"""
+
+
+def _std():
+    return {
+        "document_metadata": {
+            "jira_id": "PROJ-1", "title": "T",
+            "stp_reference": {"file": "stp.md"},
+            "total_scenarios": 1, "p0_count": 1,
+        },
+        "scenarios": [{
+            "test_id": "TS-PROJ-1-001", "requirement_id": "REQ-1",
+            "test_type": "functional", "priority": "P0", "coverage_status": "NEW",
+            "test_objective": {"title": "one thing"},
+            "test_steps": {"test_execution": [{"action": "Do it"}]},
+            "assertions": [{"description": "It happened"}],
+        }],
+    }
+
+
+def self_test(tmp):
+    os.makedirs(os.path.join(tmp, "python-tests"), exist_ok=True)
+    stub = os.path.join(tmp, "python-tests", "test_feature_stubs.py")
+    open(os.path.join(tmp, "stp.md"), "w").write(GOOD_STP)
+    open(stub, "w").write(GOOD_STUB)
+    dirs = [os.path.join(tmp, "python-tests")]
+
+    rep = validate(_std(), tmp, GOOD_STP, dirs)
+    assert not rep.errors, rep.errors
+    assert rep.checks["stubs.coverage"] == "pass"
+
+    two_rows = GOOD_STP + ("  - *Test Scenario:* **TS-PROJ-1-002**: Verify the "
+                           "other thing — **Category:** Functional — **Priority:** P1\n")
+    rep = validate(_std(), tmp, two_rows, dirs)
+    assert rep.checks["traceability.stp_scenarios_covered"] == "fail"
+    assert "TS-PROJ-1-002" in " ".join(rep.errors)
+
+    # The table layout (some hand-written STPs use it): same verdicts as bullets.
+    table = ("### **III. Test Scenarios & Traceability**\n\n"
+             "| Requirement ID | Requirement Summary | Test Scenario(s) | Tier | Priority |\n"
+             "|:--|:--|:--|:--|:--|\n"
+             "| [REQ-1](https://example.com/REQ-1) | A requirement. | **TS-PROJ-1-001**: Verify the thing | 1 | P0 |\n")
+    rep = validate(_std(), tmp, table, dirs)
+    assert not [e for e in rep.errors if "traceability" in e], rep.errors
+    gap = table + "| REQ-2 | Another. | Verify another thing | 1 | P1 |\n| | | Verify a third | 2 | P2 |\n"
+    rep = validate(_std(), tmp, gap, dirs)
+    assert rep.checks["traceability.stp_requirements_covered"] == "fail"
+    assert "REQ-2" in " ".join(rep.errors) and "REQ-1" not in " ".join(rep.errors)
+    assert parse_stp(gap)[1] == 3  # the blank-ID row is REQ-2's second scenario
+    # A Section III in a layout it cannot read is "not verified", never mass orphans.
+    rep = validate(_std(), tmp, "## Section III: Test Scenarios\n\n1. Verify the thing\n", dirs)
+    assert rep.checks["traceability.stp_requirements_covered"] == "warn"
+    assert rep.checks.get("traceability.no_orphan_scenarios") != "fail"
+    # No Section III at all: the same "not verified" warning, not a ValueError.
+    rep = validate(_std(), tmp, "# Title\n\nNo section three.\n", dirs)
+    assert rep.checks["traceability.stp_requirements_covered"] == "warn"
+
+    # A project's scenario_tiers: a tier instead of a test type is a classified scenario.
+    tiered = _std()
+    tiered["scenarios"][0].pop("test_type")
+    tiered["scenarios"][0]["tier"] = "Tier 3"
+    tiered["scenarios"][0]["marker"] = "tier3"
+    assert validate(tiered, tmp, GOOD_STP, dirs).checks["scenarios.required_fields"] == "pass"
+    tiered["scenarios"][0].pop("tier")
+    assert validate(tiered, tmp, GOOD_STP, dirs).checks["scenarios.required_fields"] == "fail"
+
+    bad = _std()
+    bad["document_metadata"]["total_scenarios"] = 2
+    assert validate(bad, tmp, GOOD_STP, dirs).checks["metadata.counts_match"] == "fail"
+
+    bad = _std()
+    bad["scenarios"][0]["test_id"] = "TS-PROJ-2-001"
+    rep = validate(bad, tmp, GOOD_STP, dirs)
+    assert rep.checks["scenarios.test_id_format"] == "fail"
+    assert rep.checks["stubs.coverage"] == "fail"   # stub now orphaned
+
+    bad = _std()
+    bad["scenarios"][0]["requirement_id"] = "REQ-NOPE"
+    bad["scenarios"][0].pop("requirement_ids", None)
+    rep = validate(bad, tmp, GOOD_STP, dirs)
+    assert rep.checks["traceability.no_orphan_scenarios"] == "fail"
+    assert rep.checks["traceability.stp_requirements_covered"] == "fail"
+
+    open(stub, "w").write(GOOD_STUB.replace("        STP: stp.md\n\n", ""))
+    rep = validate(_std(), tmp, GOOD_STP, dirs)
+    assert rep.checks["stubs.per_test_reference"] == "fail"
+    assert rep.checks["stubs.module_reference"] == "pass"  # header still there
+
+    # No STP: the Jira link is the reference, and both checks still pass.
+    open(stub, "w").write(GOOD_STUB.replace("STP: stp.md", "Jira: https://j/PROJ-1"))
+    rep = validate(_std(), tmp, GOOD_STP, dirs)
+    assert rep.checks["stubs.per_test_reference"] == "pass", rep.errors
+    assert rep.checks["stubs.module_reference"] == "pass"
+
+    # An STD with no STP at all: document_metadata.jira_url stands in for it.
+    nostp = _std()
+    nostp["document_metadata"].pop("stp_reference")
+    nostp["document_metadata"]["jira_url"] = "https://j/browse/PROJ-1"
+    rep = validate(nostp, tmp, None, dirs)
+    assert not rep.errors, rep.errors
+    nostp["document_metadata"].pop("jira_url")
+    assert validate(nostp, tmp, None, dirs).checks["metadata.required_fields"] == "fail"
+
+    # A case migrated from Polarion links its own requirement, not the file's
+    # Jira link, and lists its real Polarion id under Markers:. A live decorator
+    # would mark the case Automated in Polarion when the stub merges.
+    migrated = _std()
+    migrated["scenarios"][0].update(jira_url="https://j/browse/PROJ-7", polarion_id="PROJ-9")
+    rep = validate(migrated, tmp, GOOD_STP, dirs)
+    assert rep.checks["stubs.per_test_reference"] == "fail"
+    assert rep.checks["stubs.polarion_marker"] == "fail"
+    linked = GOOD_STUB.replace("        STP: stp.md\n", "        Jira: https://j/browse/PROJ-7\n")
+    open(stub, "w").write(linked.replace(
+        "        Preconditions:",
+        '        Markers:\n            - polarion("PROJ-9")\n\n        Preconditions:'))
+    rep = validate(migrated, tmp, GOOD_STP, dirs)
+    assert not rep.errors, rep.errors
+    migrated["scenarios"][0]["jira_url"] = "https://j/browse/PROJ-70"  # a prefix is not a match
+    assert validate(migrated, tmp, GOOD_STP, dirs).checks["stubs.per_test_reference"] == "fail"
+    migrated["scenarios"][0]["jira_url"] = "https://j/browse/PROJ-7"
+    # A link checker's comment may follow the URL; other text may not.
+    assert links_jira("        Jira: https://j/browse/PROJ-7  # <skip-link-check>", "https://j/browse/PROJ-7")
+    assert not links_jira("Jira: https://j/browse/PROJ-70  # x", "https://j/browse/PROJ-7")
+    assert not links_jira("Jira: https://j/browse/PROJ-7 and more", "https://j/browse/PROJ-7")
+    open(stub, "w").write(linked.replace(
+        "    def test_one", '    @pytest.mark.polarion("PROJ-9")\n    def test_one'))
+    rep = validate(migrated, tmp, GOOD_STP, dirs)
+    assert rep.checks["stubs.polarion_marker"] == "fail" and "Automated" in " ".join(rep.errors)
+    # The id has to sit under Markers:, not anywhere in the docstring.
+    open(stub, "w").write(linked.replace(
+        "            - It happened\n", '            - It happened\n            - polarion("PROJ-9")\n'))
+    assert validate(migrated, tmp, GOOD_STP, dirs).checks["stubs.polarion_marker"] == "fail"
+    # One reference line per test, never an STP: and a Jira: together.
+    open(stub, "w").write(GOOD_STUB.replace("        STP: stp.md\n",
+                                            "        STP: stp.md\n        Jira: https://j/browse/PROJ-7\n"))
+    assert validate(_std(), tmp, GOOD_STP, dirs).checks["stubs.per_test_reference"] == "fail"
+    # Steps the source never had are proposed, and the stub says so.
+    proposed = _std()
+    proposed["scenarios"][0].update(source_pse="partial", source_missing=["preconditions", "steps"])
+    open(stub, "w").write(GOOD_STUB)
+    assert validate(proposed, tmp, GOOD_STP, dirs).checks["stubs.source_note"] == "fail"
+    noted = lambda note: GOOD_STUB.replace(  # noqa: E731
+        "        STP: stp.md\n", "        STP: stp.md\n        Source: %s\n" % note)
+    open(stub, "w").write(noted("Polarion PROJ-9 lists no steps; the Steps below are proposed."))
+    assert validate(proposed, tmp, GOOD_STP, dirs).checks["stubs.source_note"] == "fail"  # names one
+    open(stub, "w").write(noted("Polarion PROJ-9 lists no preconditions or steps; both are proposed."))
+    assert validate(proposed, tmp, GOOD_STP, dirs).checks["stubs.source_note"] == "pass"
+    proposed["scenarios"][0]["review_note"] = "restart the service before the backup"
+    assert validate(proposed, tmp, GOOD_STP, dirs).checks["stubs.source_note"] == "fail"
+    open(stub, "w").write(noted("Polarion PROJ-9 lists no preconditions or steps; both are proposed.\n"
+                                "        Steps corrected in team review."))  # wrapped onto a 2nd line
+    assert validate(proposed, tmp, GOOD_STP, dirs).checks["stubs.source_note"] == "pass"
+    open(stub, "w").write(GOOD_STUB)
+    assert "stubs.polarion_marker" not in validate(_std(), tmp, GOOD_STP, dirs).checks
+
+    open(stub, "w").write(GOOD_STUB.rstrip() + "\n        assert True\n")
+    assert validate(_std(), tmp, GOOD_STP, dirs).checks["stubs.no_implementation"] == "fail"
+
+    # The decorator breaks `pytest --collect-only` in a --strict-markers repo that
+    # does not register qf_test_id, __test__ = False notwithstanding.
+    open(stub, "w").write(GOOD_STUB.replace(
+        "    def test_one", '    @pytest.mark.qf_test_id("TS-PROJ-1-001")\n    def test_one'))
+    rep = validate(_std(), tmp, GOOD_STP, dirs)
+    assert rep.checks["stubs.qf_test_id_marker"] == "fail"
+    assert rep.checks["stubs.coverage"] == "pass"   # the docstring tag still counts
+
+    open(stub, "w").write(GOOD_STUB.replace(" [TS-PROJ-1-001]", ""))
+    rep = validate(_std(), tmp, GOOD_STP, dirs)
+    assert rep.checks["stubs.test_id_tag"] == "fail"
+    assert rep.checks["stubs.coverage"] == "fail"   # scenario now has no stub
+
+    good_input = {
+        "source": "polarion",
+        "context": {"jira_id": "PROJ-1", "title": "T", "jira_url": "https://j/PROJ-1"},
+        "scenarios": [{"scenario_id": 1, "requirement_id": "PROJ-1",
+                       "description": "Verify the thing", "priority": "P0",
+                       "test_type": "functional", "external_id": "TC-1",
+                       "steps": ["Do it"]}],
+    }
+    assert not validate_scenarios(good_input).errors
+    import copy
+    bad = copy.deepcopy(good_input); bad["context"].pop("jira_url")
+    assert validate_scenarios(bad).checks["input.context"] == "fail"
+    bad = copy.deepcopy(good_input); bad["scenarios"][0]["priority"] = "high"
+    assert validate_scenarios(bad).checks["input.priority_values"] == "fail"
+    bad = copy.deepcopy(good_input); bad["scenarios"][0].pop("test_type")
+    assert validate_scenarios(bad).checks["input.scenario_fields"] == "fail"
+    bad = copy.deepcopy(good_input); bad["scenarios"][0]["steps"] = "Do it"
+    assert validate_scenarios(bad).checks["input.scenario_fields"] == "fail"
+    bad = copy.deepcopy(good_input); bad["scenarios"].append(bad["scenarios"][0])
+    assert validate_scenarios(bad).checks["input.unique_ids"] == "fail"
+    bad = copy.deepcopy(good_input); bad["scenarios"][0]["jira_url"] = "PROJ-1"
+    assert validate_scenarios(bad).checks["input.scenario_fields"] == "fail"
+    bad = copy.deepcopy(good_input); bad["scenarios"][0]["polarion_id"] = "PROJ-9"
+    bad["scenarios"].append(dict(bad["scenarios"][0], scenario_id=2))
+    assert validate_scenarios(bad).checks["input.unique_ids"] == "fail"
+
+    go = os.path.join(tmp, "go-tests")
+    os.makedirs(go, exist_ok=True)
+    open(os.path.join(go, "feature_stubs_test.go"), "w").write('''/*
+Feature Tests
+
+STP: stp.md
+*/
+var _ = Describe("x", func() {
+    /*
+    STP: stp.md
+
+    Preconditions:
+        - A thing
+    Steps:
+        1. Do it
+    Expected:
+        - It happened
+    */
+    PendingIt("[test_id:TS-PROJ-1-001] should work", func() {
+        Skip("Phase 1")
+    })
+})
+''')
+    rep = validate(_std(), tmp, GOOD_STP, [go])
+    assert not rep.errors, rep.errors
+
+    # The flake8 PolarionIds plugin fails every test without @pytest.mark.polarion,
+    # stubs included, and reports it at the def line.
+    open(stub, "w").write(GOOD_STUB)
+    assert validate(_std(), tmp, GOOD_STP, dirs, polarion_lint=True).checks["stubs.polarion_lint"] == "fail"
+    open(stub, "w").write(GOOD_STUB.replace("def test_one(self):", "def test_one(self):  # noqa: PID001"))
+    rep = validate(_std(), tmp, GOOD_STP, dirs, polarion_lint=True)
+    assert not rep.errors and rep.checks["stubs.polarion_lint"] == "pass", rep.errors
+    rep = validate(_std(), tmp, GOOD_STP, dirs)  # accepted, not required, without the flag
+    assert not rep.errors and "stubs.polarion_lint" not in rep.checks, rep.errors
+    open(stub, "w").write(GOOD_STUB.replace(
+        "    def test_one", "    @pytest.mark.gating  # noqa: PID001\n    def test_one"))
+    assert validate(_std(), tmp, GOOD_STP, dirs, polarion_lint=True).checks["stubs.polarion_lint"] == "fail"
+
+    # Project stub_marks: each stub test carries the mark as a live decorator.
+    open(stub, "w").write(GOOD_STUB)
+    assert validate(_std(), tmp, GOOD_STP, dirs, stub_marks=["manual"]).checks["stubs.stub_marks"] == "fail"
+    open(stub, "w").write(GOOD_STUB.replace("    def test_one", "    @pytest.mark.manual\n    def test_one"))
+    rep = validate(_std(), tmp, GOOD_STP, dirs, stub_marks=["manual"])
+    assert rep.checks["stubs.stub_marks"] == "pass", rep.errors
+    print("self-test: OK")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("file", nargs="?", help="STD YAML file to validate")
+    ap.add_argument("--scenarios", action="store_true",
+                    help="the file is a scenario list feeding std-builder "
+                         "(std-orchestrator Step 1B), not a generated STD")
+    ap.add_argument("--stp", help="STP markdown file "
+                    "(default: document_metadata.stp_reference.file)")
+    ap.add_argument("--stubs", nargs="*", metavar="DIR",
+                    help="stub directories (default: *-tests/ next to the STD)")
+    ap.add_argument("--priority", choices=sorted(PRIORITIES),
+                    help="stubs were generated with this priority filter")
+    ap.add_argument("--polarion-lint", action="store_true",
+                    help="require `# noqa: PID001` on every Python stub's def line "
+                         "(feature toggle polarion_lint)")
+    ap.add_argument("--stub-marks", nargs="*", default=[], metavar="MARK",
+                    help="require @pytest.mark.MARK on every Python stub test "
+                         "(project.yaml stub_marks)")
+    ap.add_argument("--yaml", action="store_true", help="YAML report output")
+    ap.add_argument("--self-test", action="store_true")
+    args = ap.parse_args(argv)
+
+    if args.self_test:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            self_test(tmp)
+        return
+    if not args.file:
+        ap.error("file is required (or use --self-test)")
+    try:
+        std = yaml.safe_load(open(args.file, encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as e:
+        print("error: %s" % e, file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(std, dict):
+        print("error: %s is not a YAML mapping" % args.file, file=sys.stderr)
+        sys.exit(2)
+
+    if args.scenarios:
+        sys.exit(1 if render(validate_scenarios(std), args.yaml) else 0)
+
+    base_dir = os.path.dirname(os.path.abspath(args.file))
+    stp_path = args.stp
+    if stp_path is None:
+        ref = (std.get("document_metadata") or {}).get("stp_reference")
+        stp_path = ref.get("file") if isinstance(ref, dict) else ref
+    stp_text = None
+    if stp_path:
+        found = resolve(stp_path, base_dir)
+        if found:
+            stp_text = open(found, encoding="utf-8").read()
+        else:
+            print("warning: STP not found at %s — traceability not checked"
+                  % stp_path, file=sys.stderr)
+
+    stub_dirs = args.stubs
+    if stub_dirs is None:
+        stub_dirs = sorted(d for d in glob.glob(os.path.join(base_dir, "*-tests"))
+                           if os.path.isdir(d))
+
+    failed = render(validate(std, base_dir, stp_text, stub_dirs, args.priority,
+                             args.polarion_lint, args.stub_marks), args.yaml)
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

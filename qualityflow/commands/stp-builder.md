@@ -1,13 +1,13 @@
 ---
 name: stp-builder
-description: Generate a Software Test Plan (STP) from a Jira ticket
-argument-hint: <JIRA-ID or URL>
+description: Generate a Software Test Plan (STP) from a Jira ticket, then auto-run review and refinement so the command finishes with a final STP. When the team already has an STP for the ticket in its design-docs repo, use that one instead
+argument-hint: <JIRA-ID or URL> [--stp <url>] [--generate]
 allowed-tools: Read, Write, Edit, Task, Glob, Grep, LSP, Skill, mcp__mcp-atlassian__jira_get_issue, mcp__mcp-atlassian__jira_search, mcp__github__pull_request_read, mcp__github__get_file_contents
 ---
 
 # Generate STP for $ARGUMENTS
 
-You are the STP Builder entry point. Initiate the STP generation workflow by activating the **stp-orchestrator** subagent.
+You are the STP Builder entry point. Initiate the STP generation workflow by activating the **stp-orchestrator** subagent, then chain the review cycle so the invocation ends with a reviewed STP, not a draft.
 
 ## Input
 
@@ -42,6 +42,62 @@ If `project_context.feature_toggles.stp_generation` is false:
 - Output: "STP generation is disabled for project {project_context.display_name} (stp_generation toggle is false)."
 - Exit. Do not proceed.
 
+### Step 0.5: Use the Team's Existing STP
+
+The pipeline is STP → STD → code. When the team has already written the STP
+for this ticket, that STP is the input to the STD: pull it in instead of
+generating a second one.
+
+Skip this step when `$ARGUMENTS` has `--generate`, or the project has no
+`design_docs_repo` (and no `--stp`).
+
+1. **Find it.** With `--stp <url>` (a GitHub blob or pull request file URL),
+   that file. Otherwise search `design_docs_repo` (`full_name`, `default_branch`)
+   for a Markdown file that names `{JIRA_ID}`, leaving out the template
+   (`repo_files.stp_template.path`):
+   - on the default branch: GitHub code search `{JIRA_ID} repo:{full_name}`
+     (`mcp__github__search_code`, or `gh search code "{JIRA_ID}" --repo {full_name}`);
+   - if none: open pull requests that name `{JIRA_ID}` (`mcp__github__search_issues`
+     with `repo:{full_name} is:pr is:open {JIRA_ID}`, or
+     `gh pr list --repo {full_name} --state open --search "{JIRA_ID}"`), and in
+     each, the changed `.md` files whose content names `{JIRA_ID}`.
+
+   A search hit is only a candidate. It is the ticket's STP when `{JIRA_ID}`
+   is in its file name, its title, or its metadata block (the `Metadata &
+   Tracking` section, or the lines before the first section heading when it
+   has none), for example as its feature or epic tracking link. A file that
+   names `{JIRA_ID}` only further down (a known limitation's tracked Jira, a
+   risk, a related issue) mentions the ticket and is another feature's STP:
+   drop it, and list it in the report as "mentioned in" with its URL.
+
+   Exactly one STP: use it. None: continue to Step 1 and generate. Several:
+   list them with their URLs, generate nothing, and stop; the user re-runs
+   with `--stp <url>`. Never guess a path you have not seen.
+2. **Pull it in.** Fetch the file at the exact commit (the default branch's head,
+   or the pull request's head) and write it unchanged to
+   `outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md`. Write
+   `outputs/{JIRA_ID}/stp/{JIRA_ID}_stp_source.yaml`:
+
+   ```yaml
+   url: <blob URL at the commit>
+   repo: <full_name>
+   path: <path in the repo>
+   commit: <sha>
+   pull_request: <PR URL, or null when it is on the default branch>
+   merged: <true when on the default branch>
+   imported_at: <UTC ISO timestamp>
+   ```
+
+3. **Approval.** A file on the default branch was approved when it merged:
+   record the gate with
+   `python skills/pipeline-state/state.py approve {JIRA_ID} stp --by "merged in {full_name}"`. A file from an open pull request is still a draft:
+   record nothing, and it waits for approval like a generated STP.
+4. **Stop here.** Do not run Step 1 or Step 2: the document is the team's, and
+   an automatic refine would rewrite it. Report the source URL, merged or open
+   PR, and the next step, `/std-builder {JIRA_ID}` (after approval when it came
+   from an open PR). `/review-stp {JIRA_ID}` reviews it on request. Print no
+   `Verdict:` line: there is no QF review to report.
+
 ### Step 1: Activate Orchestrator
 
 Activate the **stp-orchestrator** subagent with the resolved Jira ticket ID **and** `project_context`.
@@ -69,11 +125,76 @@ The orchestrator will:
    - Sanitize PII, validate structure, format tables
    - Save to `outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md`
 
+### Step 2: Review & Refine (automatic)
+
+The STP the orchestrator just saved is a draft. Chain the review cycle now —
+do not stop and wait for the user to trigger it. Review and refinement stay
+separate commands with separate artifacts and verdicts (they are chained, not
+merged): the reviewer runs in its own context against freshly fetched Jira
+data, so it can genuinely reject what the generator produced.
+
+**Check the `stp_review` toggle first:** if
+`project_context.feature_toggles.stp_review` is false, skip this step and
+report the STP as generated but unreviewed. Do not invoke review or refine.
+
+1. Invoke the review:
+
+   **Tool:** Skill
+   **Parameters:**
+   - skill: "review-stp"
+   - args: "{JIRA_ID}"
+
+   This produces `outputs/{JIRA_ID}/reviews/{JIRA_ID}_stp_review.md` with a
+   verdict (APPROVED / APPROVED_WITH_FINDINGS / NEEDS_REVISION).
+
+2. **If the review has any CRITICAL or MAJOR findings** (verdict
+   `NEEDS_REVISION`, or `APPROVED_WITH_FINDINGS` with 1+ major), invoke the
+   refine loop:
+
+   **Tool:** Skill
+   **Parameters:**
+   - skill: "refine-stp"
+   - args: "{JIRA_ID} --address-findings --no-notes"
+
+   This iterates fix → re-review until 0 critical AND 0 major findings, or
+   its iteration / no-improvement cap is hit. MINOR findings are not
+   targeted. Skip this invocation when the review has 0 critical and 0 major
+   (APPROVED, or APPROVED_WITH_FINDINGS with minors only).
+
+**Failure isolation:** if review or refinement fails, do NOT delete or regenerate
+the STP. Report the saved STP path, the sub-command's error, and the manual
+recovery (`/review-stp {JIRA_ID}`, then `/refine-stp {JIRA_ID}` if needed).
+A failed review leaves a draft STP — that is strictly better than no STP.
+
 ## Expected Output
 
-A complete Software Test Plan markdown file saved to `outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md`.
+When `stp_review` is enabled (the default), one invocation ends with a
+**final** STP:
+
+- STP: `outputs/{JIRA_ID}/stp/{JIRA_ID}_test_plan.md`
+- Review report: `outputs/{JIRA_ID}/reviews/{JIRA_ID}_stp_review.md`
+
+Close with a short summary: initial verdict → final verdict (and refinement
+iterations, if the loop ran), then the next step —
+`/std-builder {JIRA_ID}`, noting that the STD approval gate still requires a
+human to approve the reviewed STP first (dashboard, or
+`/approve {JIRA_ID} stp`). The automatic review does not
+self-approve the gate.
+
+Then the sign-offs the author still has to collect: the count of `*Sign-off:*`
+and `*PM/Lead Agreement:*` placeholders in the STP, and the `past_signer`
+entries of `{JIRA_ID}_stakeholders.yaml` as "usually signed by: Name (@handle,
+last YYYY-MM-DD), ...". Skip the line when the STP has no placeholders.
+
+When `stp_review` is disabled: just the STP file, reported as unreviewed.
+
+If the orchestrator reported an `LSP unavailable (...)` line, repeat it
+verbatim in the closing summary: it is how the dashboard tells a run that
+traced call graphs from one that fell back to text search.
 
 ## Activation
 
 1. Invoke the **project-resolver** skill with `$ARGUMENTS` to get `project_context`.
+1.5. Run Step 0.5: when the team's STP exists, pull it in and stop there.
 2. Activate the **stp-orchestrator** agent, passing both the Jira ticket ID and `project_context`.
+3. When the orchestrator finishes, run Step 2 (review, then refine when there are critical or major findings).

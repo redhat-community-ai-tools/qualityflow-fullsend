@@ -35,7 +35,7 @@ fi
 
 # --- Syntax check for co-located Python tests ---
 if [[ -n "${SOURCE_REPO_DIR:-}" ]]; then
-  QF_PY_FILES=$(find "${SOURCE_REPO_DIR}" -name "qf_test_*.py" 2>/dev/null | head -20)
+  QF_PY_FILES=$(find "${SOURCE_REPO_DIR}" -name "test_qf_*.py" 2>/dev/null | head -20)
   if [[ -n "${QF_PY_FILES}" ]]; then
     echo "Running syntax check on co-located Python tests..."
     py_errors=0
