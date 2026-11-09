@@ -1,0 +1,166 @@
+{
+  "status": "success",
+  "repo": "fullsend-ai/fullsend",
+  "pr_number": 7262,
+  "work_item": "#7257",
+  "verdict": "NEEDS_REVISION",
+  "confidence": "MEDIUM",
+  "coverage_signal": "static",
+  "escalate": true,
+  "requirements": {
+    "total": 6,
+    "covered": 1,
+    "partial": 2,
+    "uncovered": 3,
+    "items": [
+      {
+        "requirement_id": "AC1",
+        "statement": "drain_runner_vm exists in lib.sh, unit-tested in lib_test.sh; graceful, bounded (10-min default), drain-then-proceed.",
+        "source": "#7257:acceptance-criteria",
+        "status": "covered",
+        "tests": [
+          "lib_test.sh: drain_runner_vm: idle on first poll reports OK",
+          "lib_test.sh: drain_runner_vm: cap overrun warns and proceeds",
+          "lib_test.sh: drain_runner_vm: non-numeric DRAIN_TIMEOUT_SEC falls back to 600",
+          "lib_test.sh: drain_runner_vm: persistent poll failure retries then gives up at cap",
+          "lib_test.sh: drain_runner_vm: transient poll failure retries instead of proceeding immediately"
+        ]
+      },
+      {
+        "requirement_id": "AC2",
+        "statement": "Deleting a fleet VM (RUNNER_TOKEN mode or no proj/vm match) succeeds without GL_TOKEN and does not touch the shared fleet runner.",
+        "source": "#7257:acceptance-criteria",
+        "status": "partial",
+        "tests": [
+          "lib_test.sh: delete-gcp-vm.sh: neither RUNNER_TOKEN nor GL_TOKEN fails closed",
+          "lib_test.sh: delete-openshift-vm.sh: neither RUNNER_TOKEN nor GL_TOKEN fails closed"
+        ]
+      },
+      {
+        "requirement_id": "AC3",
+        "statement": "delete-*-vm.sh drains the VM before deletion; --no-drain skips it.",
+        "source": "#7257:acceptance-criteria",
+        "status": "uncovered",
+        "tests": []
+      },
+      {
+        "requirement_id": "AC4",
+        "statement": "create-*-vm.sh --recreate drains, deletes and recreates an existing VM using only create's env in fleet mode; absent the flag, refuse-on-existing is unchanged.",
+        "source": "#7257:acceptance-criteria",
+        "status": "uncovered",
+        "tests": []
+      },
+      {
+        "requirement_id": "AC5",
+        "statement": "Recreating a fleet VM leaves the shared runner ID stable and does not cut a job that finishes within the drain cap.",
+        "source": "#7257:acceptance-criteria",
+        "status": "uncovered",
+        "tests": []
+      },
+      {
+        "requirement_id": "AC6",
+        "statement": "Usage comments in create-*/delete-* describe capabilities, flags, modes and required credentials.",
+        "source": "#7257:acceptance-criteria",
+        "status": "partial",
+        "tests": []
+      }
+    ]
+  },
+  "findings": {
+    "critical": 3,
+    "major": 3,
+    "minor": 2,
+    "actionable": 7,
+    "total": 8,
+    "omitted": 0,
+    "items": [
+      {
+        "finding_id": "QF-1",
+        "severity": "CRITICAL",
+        "dimension": "requirement_coverage",
+        "requirement_ref": "#7257:AC4",
+        "description": "AC4 is neither implemented nor tested. The PR body says 'Closes #7257', but no create-gcp-vm.sh or create-openshift-vm.sh change is in the diff, so --recreate (drain -> delete -> create in one credential-consistent command) does not exist.",
+        "remediation": "Add --recreate to both create scripts with lib_test.sh coverage (flag parsed, refuse-on-existing preserved without the flag), or downgrade the PR link to 'Refs #7257' and keep the issue open.",
+        "evidence": "pr.json files[] contains only README.md, delete-gcp-vm.sh, delete-openshift-vm.sh, lib.sh, lib_test.sh.",
+        "file": "hack/gitlab-runner-vm/create-gcp-vm.sh",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-2",
+        "severity": "CRITICAL",
+        "dimension": "requirement_coverage",
+        "requirement_ref": "#7257:AC3",
+        "description": "The new --no-drain escape hatch has no test. The argument loop in both delete scripts partitions $@ into --no-drain vs vm_names, and nothing asserts the flag is stripped from the VM list or that the 'skipping drain (--no-drain)' branch is taken. A regression treating --no-drain as a VM name would pass CI.",
+        "remediation": "Add to lib_test.sh: assert_fails_with 'delete-gcp-vm.sh: --no-drain is not a VM name' 'specify at least one VM name' with_clean_env GCP_PROJECT=p RUNNER_TOKEN=glrt-x bash \"${DELETE_GCP}\" --no-drain, plus the OpenShift twin. Runs offline with no gcloud/virtctl.",
+        "evidence": "diff.patch adds the vm_names/--no-drain loop to both delete scripts; lib_test.sh adds no assertion mentioning --no-drain.",
+        "file": "hack/gitlab-runner-vm/lib_test.sh",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-3",
+        "severity": "CRITICAL",
+        "dimension": "requirement_coverage",
+        "requirement_ref": "#7257:AC5",
+        "description": "AC5 (recreating a fleet VM leaves the shared runner ID stable and does not cut a job that finishes within the drain cap) has no verification of any kind: no unit test, no e2e, and no documented manual verification step in the README change.",
+        "remediation": "Add a manual verification note to hack/gitlab-runner-vm/README.md (drain a VM with a live job, confirm the shared runner ID is unchanged and the job completes), or file a follow-up issue for an e2e check.",
+        "evidence": "No test or README section in the diff references runner ID stability or in-flight job completion.",
+        "file": "hack/gitlab-runner-vm/README.md",
+        "actionable": false
+      },
+      {
+        "finding_id": "QF-4",
+        "severity": "MAJOR",
+        "dimension": "requirement_coverage",
+        "requirement_ref": "#7257:AC2",
+        "description": "AC2 is only tested in the negative. Both new delete-script tests assert that neither token fails closed; nothing asserts the positive path the AC states -- with RUNNER_TOKEN set and no GL_TOKEN, validation passes and deregistration is skipped. The lookup_runners=false branch and the 'skipping GitLab deregistration (fleet mode)' output are unexercised.",
+        "remediation": "Add a test running with_clean_env GCP_PROJECT=p RUNNER_TOKEN=glrt-x bash \"${DELETE_GCP}\" fullsend-gitlab-runner-01 and assert the output does NOT contain 'GL_TOKEN is required' (a later failure on missing gcloud is fine).",
+        "evidence": "lib_test.sh '== delete script validation ==' contains only the two assert_fails_with cases.",
+        "file": "hack/gitlab-runner-vm/lib_test.sh",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-5",
+        "severity": "MAJOR",
+        "dimension": "scenario_quality",
+        "requirement_ref": "#7257:AC1",
+        "description": "The two caveats the issue explicitly said the implementation must not get wrong are the two the tests do not pin: that the drain uses SIGQUIT rather than a bare systemctl stop (which trips Fedora's 45s TimeoutStopUSec abort), and that the unit is runtime-masked so Restart=always cannot restart the runner mid-drain. drain_capture_mock already captures the remote command string, so both are one grep away.",
+        "remediation": "Extend the drain_capture_mock block in lib_test.sh to assert the captured command contains '-s QUIT' and 'systemctl mask --runtime gitlab-runner.service', and contains no bare 'systemctl stop gitlab-runner'.",
+        "evidence": "The capture assertions check only 'sudo -u fedora podman ps', 'sudo -u fedora test -f' and 'sudo -u fedora sed -i'; the static regression greps pin shutdown_timeout, is-active and chown/chmod but never the signal or the mask.",
+        "file": "hack/gitlab-runner-vm/lib_test.sh",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-6",
+        "severity": "MAJOR",
+        "dimension": "test_level",
+        "requirement_ref": "#7257:AC6",
+        "description": "--help in both delete scripts was rewritten from 'head -26 | tail -24' to an awk header scan, and neither rewritten path has a test -- while lib_test.sh already contains exactly this smoke test for create-gcp-vm.sh --help and create-openshift-vm.sh --help. An awk guard that silently prints nothing after a header edit would not fail CI.",
+        "remediation": "Add assert_succeeds_with 'delete-gcp-vm.sh --help lists modes' '--no-drain' with_clean_env bash \"${DELETE_GCP}\" --help, plus the OpenShift twin, mirroring the existing create-script assertions.",
+        "evidence": "diff.patch replaces the head/tail help extraction with awk in both delete scripts; no --help assertion for DELETE_GCP/DELETE_OCP is added.",
+        "file": "hack/gitlab-runner-vm/lib_test.sh",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-7",
+        "severity": "MINOR",
+        "dimension": "scenario_quality",
+        "requirement_ref": "#7257:AC1",
+        "description": "No drain test covers the ordinary busy-to-idle transition. Every mock is always-idle, always-busy, always-failing, or service-active with an empty container list; none returns a runner-* container on one poll and idle on the next, which is the normal successful drain.",
+        "remediation": "Add a counter mock that prints 'runner-abc123' on poll 1 and '__SVC__inactive' on poll 2, asserting 'OK: runner idle' appears and 'drain cap' does not.",
+        "file": "hack/gitlab-runner-vm/lib_test.sh",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-8",
+        "severity": "MINOR",
+        "dimension": "rule_compliance",
+        "requirement_ref": "#7257:AC1",
+        "description": "Four of the new checks are source-text greps against lib.sh and the delete scripts (export vm_name..., 1i shutdown_timeout, sudo chown $cfg_owner, systemctl is-active). They assert a string exists, not that the behavior happens, so they pass on dead or unreachable code and break on harmless refactors; two of them duplicate assertions drain_capture_mock already makes behaviorally.",
+        "remediation": "Keep the greps that have no behavioral equivalent and drop the two already covered behaviorally by drain_capture_mock, so implementation text is not pinned twice.",
+        "file": "hack/gitlab-runner-vm/lib_test.sh",
+        "actionable": true
+      }
+    ]
+  },
+  "report": "qf_review.md"
+}

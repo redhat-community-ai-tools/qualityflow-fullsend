@@ -1,0 +1,1330 @@
+diff --git a/hack/gitlab-runner-vm/README.md b/hack/gitlab-runner-vm/README.md
+index caf16ca0f2..f788e40295 100644
+--- a/hack/gitlab-runner-vm/README.md
++++ b/hack/gitlab-runner-vm/README.md
+@@ -59,12 +59,22 @@ RUNNER_TOKEN=glrt-xxx \
+   RUNNER_IMAGE=ghcr.io/org/runner:v1.2.3 \
+   ./create-openshift-vm.sh 05
+ 
+-# 2. Delete a VM:
++# 2. Delete a VM (individual runner — drains, deregisters, deletes):
+ GL_TOKEN=glpat-xxx \
+   GITLAB_URL=https://gitlab.example.com \
+   NAMESPACE=my-namespace \
+   ./delete-openshift-vm.sh fullsend-gitlab-runner-01
+ 
++# Or delete a fleet VM (no GL_TOKEN — drains and deletes, does not deregister):
++RUNNER_TOKEN=glrt-xxx NAMESPACE=my-namespace \
++  ./delete-openshift-vm.sh fullsend-gitlab-runner-05
++
++# Or skip the drain step and delete immediately:
++GL_TOKEN=glpat-xxx \
++  GITLAB_URL=https://gitlab.example.com \
++  NAMESPACE=my-namespace \
++  ./delete-openshift-vm.sh --no-drain fullsend-gitlab-runner-01
++
+ # 3. List VMs:
+ NAMESPACE=my-namespace ./delete-openshift-vm.sh --list
+ ```
+@@ -101,12 +111,22 @@ RUNNER_TOKEN=glrt-xxx \
+   RUNNER_IMAGE=ghcr.io/org/runner:v1.2.3 \
+   ./create-gcp-vm.sh 05
+ 
+-# 2. Delete a VM:
++# 2. Delete a VM (individual runner — drains, deregisters, deletes):
+ GL_TOKEN=glpat-xxx \
+   GITLAB_URL=https://gitlab.example.com \
+   GCP_PROJECT=my-gcp-project \
+   ./delete-gcp-vm.sh fullsend-gitlab-runner-01
+ 
++# Or delete a fleet VM (no GL_TOKEN — drains and deletes, does not deregister):
++RUNNER_TOKEN=glrt-xxx GCP_PROJECT=my-gcp-project \
++  ./delete-gcp-vm.sh fullsend-gitlab-runner-05
++
++# Or skip the drain step and delete immediately:
++GL_TOKEN=glpat-xxx \
++  GITLAB_URL=https://gitlab.example.com \
++  GCP_PROJECT=my-gcp-project \
++  ./delete-gcp-vm.sh --no-drain fullsend-gitlab-runner-01
++
+ # 3. List VMs:
+ GCP_PROJECT=my-gcp-project ./delete-gcp-vm.sh --list
+ ```
+@@ -117,13 +137,14 @@ GCP_PROJECT=my-gcp-project ./delete-gcp-vm.sh --list
+ 
+ | Variable | Required | Default | Description |
+ |---|---|---|---|
+-| `RUNNER_TOKEN` | yes (create)² | — | GitLab runner authentication token (`glrt-*`). When set, the VM joins an existing runner pool and `GL_TOKEN` / `PROJECT_ID` / `GROUP_ID` are not required |
+-| `GL_TOKEN` | yes (create²/delete) | — | GitLab PAT (Owner role on the target group or project, scopes: `create_runner` + `manage_runner` + `api`). In create mode, required unless `RUNNER_TOKEN` is set; delete scripts always require it (they don't accept `RUNNER_TOKEN`) |
++| `RUNNER_TOKEN` | yes (create)² | — | GitLab runner authentication token (`glrt-*`). In create mode, the VM joins an existing runner pool and `GL_TOKEN` / `PROJECT_ID` / `GROUP_ID` are not required. In delete mode, setting it selects fleet mode: the shared fleet runner is not deregistered and `GL_TOKEN` is not required |
++| `GL_TOKEN` | yes (create²/delete³) | — | GitLab PAT (Owner role on the target group or project, scopes: `create_runner` + `manage_runner` + `api`). In create mode, required unless `RUNNER_TOKEN` is set. In delete mode, required unless `RUNNER_TOKEN` is set (fleet mode) — used to look up and deregister an individually-registered runner |
+ | `PROJECT_ID` | yes (create)¹ | — | GitLab project ID — registers a project-scoped runner (`locked=true`) |
+ | `GROUP_ID` | yes (create)¹ | — | GitLab group ID — registers a group-scoped runner (`locked=false`). Recommended for platform-service deployments |
+-| `GITLAB_URL` | yes | — | GitLab instance URL |
++| `GITLAB_URL` | yes (create/delete³) | — | GitLab instance URL. In delete mode, required only when `GL_TOKEN` is used to look up / deregister a runner (not required in fleet mode) |
+ | `RUNNER_IMAGE` | yes (create) | — | Image pre-pulled as a warm cache; jobs must still set `image:` in `.gitlab-ci.yml` |
+ | `RUNNER_TAG` | no | `fullsend-gitlab-runner` | Runner tag for job matching |
++| `DRAIN_TIMEOUT_SEC` | no | `600` | Delete mode only: cap in seconds on draining in-flight jobs (SIGQUIT + wait for `runner-*` containers to exit) before deleting the VM. On cap overrun, the script warns and proceeds. See `--no-drain` to skip draining entirely |
+ | `RUNNER_ACCESS_LEVEL` | no | `not_protected` | `ref_protected` restricts the runner to protected branches and tags, so merge-request pipelines on unprotected source refs never match and sit `pending`. In project mode, `not_protected` means any job on any branch of the project can run; in group mode, any tag-matched job on any branch of any project invited into the group tree runs on this VM (see Security below) |
+ | `OPENSHELL_VERSION` | no | from `.github/scripts/openshell-version.sh` | OpenShell version used at **VM provision** (Renovate-tracked). Per-job `prepare.sh` re-reads the job image's `openshell --version` and upgrades the host CLI + supervisor when they differ, so a stale VM pin cannot stick. |
+ | `GITLAB_RUNNER_VERSION` | no | `19.2.1` | gitlab-runner version |
+@@ -131,6 +152,7 @@ GCP_PROJECT=my-gcp-project ./delete-gcp-vm.sh --list
+ 
+ ¹ Exactly one of `PROJECT_ID` or `GROUP_ID` must be set when registering a new runner with `GL_TOKEN` (mutually exclusive). Not required when `RUNNER_TOKEN` is set.
+ ² Create mode: `RUNNER_TOKEN` joins an existing pool (and takes precedence if both are set). `GL_TOKEN` registers a new runner. One of the two is required.
++³ Delete mode: `RUNNER_TOKEN` selects fleet mode (skip deregistration, `GL_TOKEN`/`GITLAB_URL` not required). Otherwise `GL_TOKEN` + `GITLAB_URL` are required so the script can look up and deregister an individually-registered runner — omitting them is not authorization to skip deregistration.
+ 
+ ### OpenShift-specific
+ 
+@@ -139,6 +161,7 @@ GCP_PROJECT=my-gcp-project ./delete-gcp-vm.sh --list
+ | `NAMESPACE` | yes (create/delete) | — | OpenShift namespace |
+ | `VM_USER` | no | `fedora` | Cloud-image login user (`cloud-user` on RHEL/CentOS Stream images) |
+ | `SSH_PUBLIC_KEY` | no | contents of `~/.ssh/id_rsa.pub` or `id_ed25519.pub` | SSH public key contents (not a path) |
++| `RUNNER_USER` | no | `VM_USER` | Delete mode only: Unix account gitlab-runner/podman run as on the VM (setup.sh's `RUNNER_USER`). Used to drain as the correct identity when it differs from `VM_USER` |
+ 
+ ### GCE-specific
+ 
+@@ -152,13 +175,14 @@ GCP_PROJECT=my-gcp-project ./delete-gcp-vm.sh --list
+ | `GCP_USE_IAP` | no | `true` | Use IAP tunneling for SSH. Set to `false` to create the VM with an external IP and SSH directly. |
+ | `GCP_IMAGE_FAMILY` | no | `fedora-cloud-43-x86-64` | GCE image family |
+ | `GCP_IMAGE_PROJECT` | no | `fedora-cloud` | GCE image project |
++| `RUNNER_USER` | no | unset | Delete mode only: Unix account gitlab-runner/podman run as on the VM (setup.sh's `RUNNER_USER`, i.e. whichever identity ran `setup.sh`). Used to drain as the correct identity when `gcloud compute ssh` connects as someone else. GCE has no fixed login user equivalent to OpenShift's `VM_USER`, so unlike there this has no safe default — without it, the drain runs as the connecting identity and can under-report idle if that identity differs from the one gitlab-runner runs as |
+ 
+ ## Files
+ 
+ - `create-openshift-vm.sh` — end-to-end VM creation on OpenShift + runner registration + setup
+-- `delete-openshift-vm.sh` — OpenShift VM teardown + runner deregistration
++- `delete-openshift-vm.sh` — drain in-flight jobs, then OpenShift VM teardown + runner deregistration
+ - `create-gcp-vm.sh` — end-to-end VM creation on GCE + runner registration + setup
+-- `delete-gcp-vm.sh` — GCE VM teardown + runner deregistration
++- `delete-gcp-vm.sh` — drain in-flight jobs, then GCE VM teardown + runner deregistration
+ - `setup.sh` — standalone VM configuration (called by create-openshift-vm.sh / create-gcp-vm.sh). Idempotent and safe to re-run in place as a debug convenience; recreation is the compliance path (see #7257).
+ - `setup_test.sh` — unit tests for setup.sh idempotency hygiene (backup, gateway seed skip)
+ - `gitlab-runner-version.sh` — central pin for the gitlab-runner version
+diff --git a/hack/gitlab-runner-vm/delete-gcp-vm.sh b/hack/gitlab-runner-vm/delete-gcp-vm.sh
+index a9c90d7412..e7a441069c 100755
+--- a/hack/gitlab-runner-vm/delete-gcp-vm.sh
++++ b/hack/gitlab-runner-vm/delete-gcp-vm.sh
+@@ -1,30 +1,70 @@
+ #!/usr/bin/env bash
+ #
+-# delete-gcp-vm.sh — Delete a GitLab Runner GCE VM and deregister it from GitLab.
++# delete-gcp-vm.sh — Drain and delete a GitLab Runner GCE VM.
+ #
+ # This script:
+-#   1. Finds the runner by description via the GitLab API
+-#   2. Deregisters the runner from GitLab
+-#   3. Deletes the GCE instance
++#   1. Drains the runner on each VM (SIGQUIT + wait for runner-*
++#      containers) unless --no-drain is set. Bounded by DRAIN_TIMEOUT_SEC
++#      (default 600s); on cap overrun, warns and proceeds.
++#   2. Deregisters the GitLab runner when this VM has its own registration
++#      (description matches GCP_PROJECT/vm-name). Skipped in fleet mode.
++#   3. Deletes the GCE instance.
++#
++# Two modes:
++#   Fleet (RUNNER_TOKEN is set, or no proj/vm runner match):
++#     Does not touch the shared fleet runner. GL_TOKEN is not required.
++#     GitLab prunes the offline system_id.
++#   Individual (GL_TOKEN is set and a proj/vm runner is found):
++#     Deregisters that runner, then deletes the VM. GL_TOKEN is required
++#     only when a deregistration will actually occur.
+ #
+ # Recreation (drain → delete → create) is the compliance path for runner
+ # VMs; in-place setup.sh re-run is a developer/debug convenience only.
+ # See issue #7257.
+ #
+ # Required environment variables:
+-#   GL_TOKEN     — GitLab personal access token
+-#   GITLAB_URL   — GitLab instance URL (e.g. https://gitlab.example.com)
+ #   GCP_PROJECT  — GCP project ID
+ #
++# Mode-specific environment variables:
++#   RUNNER_TOKEN — when set, skip GitLab deregistration (fleet mode).
++#   GL_TOKEN     — GitLab PAT (scopes: api + manage_runner). Required unless
++#                  RUNNER_TOKEN is set (fleet mode).
++#   GITLAB_URL   — GitLab instance URL. Required unless RUNNER_TOKEN is set.
++#
+ # Optional environment variables:
+-#   GCP_ZONE    — GCE zone (default: us-east1-b)
+-#   RUNNER_TAG  — runner tag used for registration (default: fullsend-gitlab-runner)
++#   GCP_ZONE           — GCE zone (default: us-east1-b)
++#   GCP_USE_IAP        — use IAP tunneling for SSH (default: true). Set to false
++#                        when the VM was created with an external IP.
++#   RUNNER_TAG         — runner tag used for lookup (default: fullsend-gitlab-runner)
++#   DRAIN_TIMEOUT_SEC  — drain cap in seconds (default: 600)
++#   RUNNER_USER        — Unix account gitlab-runner/podman run as on the VM
++#                        (setup.sh's RUNNER_USER, i.e. whichever identity ran
++#                        setup.sh). Used to drain as the correct identity when
++#                        the caller's `gcloud compute ssh` connects as someone
++#                        else. Default: unset (drain runs as the connecting
++#                        identity; may under-report idle if that identity
++#                        differs from the one gitlab-runner runs as).
++#
++# Arguments:
++#   --no-drain  — skip the drain step and delete immediately
++#   --list      — list runner VMs and exit
++#   <vm-name>   — one or more VMs (fullsend-gitlab-runner-NN)
+ #
+ # Usage:
++#   # Fleet VM (no GL_TOKEN):
++#   RUNNER_TOKEN=glrt-xxx GCP_PROJECT=my-gcp-project \
++#     ./delete-gcp-vm.sh fullsend-gitlab-runner-01
++#
++#   # Individual runner:
+ #   GL_TOKEN=glpat-xxx GITLAB_URL=https://gitlab.example.com \
+ #     GCP_PROJECT=my-gcp-project \
+ #     ./delete-gcp-vm.sh fullsend-gitlab-runner-01
+ #
++#   # Skip drain:
++#   GL_TOKEN=glpat-xxx GITLAB_URL=https://gitlab.example.com \
++#     GCP_PROJECT=my-gcp-project \
++#     ./delete-gcp-vm.sh --no-drain fullsend-gitlab-runner-01
++#
+ #   # List existing runner VMs:
+ #   GCP_PROJECT=my-gcp-project ./delete-gcp-vm.sh --list
+ #
+@@ -33,20 +73,28 @@ set -euo pipefail
+ GITLAB_URL="${GITLAB_URL:-}"
+ GCP_PROJECT="${GCP_PROJECT:-}"
+ GCP_ZONE="${GCP_ZONE:-us-east1-b}"
++GCP_USE_IAP="${GCP_USE_IAP:-true}"
+ RUNNER_TAG="${RUNNER_TAG:-fullsend-gitlab-runner}"
++RUNNER_USER="${RUNNER_USER:-}"
+ PREFIX="fullsend-gitlab-runner"
+ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++no_drain=false
+ 
+ # shellcheck source=lib.sh
+ source "${SCRIPT_DIR}/lib.sh"
+ 
+ usage() {
+-  echo "Usage: GL_TOKEN=glpat-xxx GCP_PROJECT=<project> $0 <vm-name> [vm-name ...]"
++  echo "Usage: GCP_PROJECT=<project> $0 [--no-drain] <vm-name> [vm-name ...]"
+   echo "       GCP_PROJECT=<project> $0 --list"
++  echo ""
++  echo "Run '$0' with --help for details."
+ }
+ 
+ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+-  head -26 "$0" | tail -24 | sed 's/^# \?//'
++  # Extract the comment block after the shebang until the first non-comment
++  # line, stripping the leading "# " prefix.  This is immune to header edits
++  # (no hardcoded line numbers).
++  awk 'NR==1{next} /^[^#]/{exit} {sub(/^# ?/, ""); print}' "$0"
+   exit 0
+ fi
+ 
+@@ -55,6 +103,11 @@ if [ -z "${GCP_PROJECT}" ]; then
+   exit 1
+ fi
+ 
++if [ "${GCP_USE_IAP}" != "true" ] && [ "${GCP_USE_IAP}" != "false" ]; then
++  echo "ERROR: GCP_USE_IAP must be 'true' or 'false' (got: ${GCP_USE_IAP})" >&2
++  exit 1
++fi
++
+ if [ "${1:-}" = "--list" ]; then
+   echo "Runner VMs in ${GCP_PROJECT} (${GCP_ZONE}):"
+   gcloud compute instances list \
+@@ -65,33 +118,90 @@ if [ "${1:-}" = "--list" ]; then
+   exit 0
+ fi
+ 
+-if [ $# -eq 0 ]; then
++vm_names=()
++for arg in "$@"; do
++  if [ "${arg}" = "--no-drain" ]; then
++    no_drain=true
++  else
++    vm_names+=("${arg}")
++  fi
++done
++
++if [ "${#vm_names[@]}" -eq 0 ]; then
+   echo "ERROR: specify at least one VM name to delete" >&2
+   usage >&2
+   exit 1
+ fi
+ 
+-if [ -z "${GL_TOKEN:-}" ]; then
+-  echo "ERROR: GL_TOKEN is required (GitLab personal access token)" >&2
+-  usage >&2
+-  exit 1
+-fi
+-if ! [[ "${GL_TOKEN}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+-  echo "ERROR: GL_TOKEN contains invalid characters" >&2
++if [ -n "${RUNNER_USER}" ] && ! [[ "${RUNNER_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
++  echo "ERROR: RUNNER_USER must be a plain Unix user name (got: ${RUNNER_USER})" >&2
+   exit 1
+ fi
+ 
+-if [ -z "${GITLAB_URL}" ]; then
+-  echo "ERROR: GITLAB_URL is required (e.g. https://gitlab.example.com)" >&2
++# GL_TOKEN is required unless RUNNER_TOKEN signals fleet mode. Fleet mode
++# never deregisters, so it never needs GitLab credentials. Otherwise we must
++# be able to look up a proj/vm match before deciding whether to deregister —
++# omitting GL_TOKEN is not itself authorization to skip deregistration.
++lookup_runners=false
++if uses_runner_token; then
++  :
++elif [ -n "${GL_TOKEN:-}" ]; then
++  if ! [[ "${GL_TOKEN}" =~ ^[A-Za-z0-9._-]+$ ]]; then
++    echo "ERROR: GL_TOKEN contains invalid characters" >&2
++    exit 1
++  fi
++  if [ -z "${GITLAB_URL}" ]; then
++    echo "ERROR: GITLAB_URL is required (e.g. https://gitlab.example.com)" >&2
++    exit 1
++  fi
++  if ! [[ "${GITLAB_URL}" =~ ^https://[a-zA-Z0-9._-]+(:[0-9]+)?$ ]]; then
++    echo "ERROR: GITLAB_URL must start with https:// (got: ${GITLAB_URL})" >&2
++    exit 1
++  fi
++  lookup_runners=true
++else
++  echo "ERROR: GL_TOKEN is required unless RUNNER_TOKEN is set (fleet mode)" >&2
++  echo "  Hint: set RUNNER_TOKEN for a fleet VM, or GL_TOKEN + GITLAB_URL to look up and deregister an individually-registered runner" >&2
+   exit 1
+ fi
+-if ! [[ "${GITLAB_URL}" =~ ^https://[a-zA-Z0-9._-]+(:[0-9]+)?$ ]]; then
+-  echo "ERROR: GITLAB_URL must start with https:// (got: ${GITLAB_URL})" >&2
+-  exit 1
++
++# Non-IAP (direct public-IP) drain connections trust-on-first-use and reject
++# key changes for the rest of this invocation, mirroring create-gcp-vm.sh's
++# direct-IP path — one known-hosts tempfile per delete invocation (not per
++# VM, not per drain poll), cleaned up on exit.
++GCP_KNOWN_HOSTS=""
++if [ "${GCP_USE_IAP}" = "false" ]; then
++  GCP_KNOWN_HOSTS=$(mktemp)
++  trap 'rm -f "${GCP_KNOWN_HOSTS}"' EXIT
+ fi
+ 
++# SSH helper for drain_runner_vm. Reads vm_name, GCP_PROJECT, GCP_ZONE,
++# GCP_USE_IAP, and GCP_KNOWN_HOSTS from the environment (exported before
++# drain_runner_vm).
++gcp_drain_ssh() {
++  local ssh_flags=()
++  if [ "${GCP_USE_IAP}" = "true" ]; then
++    ssh_flags=(
++      --tunnel-through-iap
++      --ssh-flag="-o StrictHostKeyChecking=no"
++      --ssh-flag="-o UserKnownHostsFile=/dev/null"
++    )
++  else
++    ssh_flags=(
++      --ssh-flag="-o StrictHostKeyChecking=accept-new"
++      --ssh-flag="-o UserKnownHostsFile=${GCP_KNOWN_HOSTS}"
++    )
++  fi
++  gcloud compute ssh "${vm_name}" \
++    --project="${GCP_PROJECT}" \
++    --zone="${GCP_ZONE}" \
++    "${ssh_flags[@]}" \
++    --ssh-flag="-o ConnectTimeout=10" \
++    --command="$1"
++}
++
+ had_errors=false
+-for vm_name in "$@"; do
++for vm_name in "${vm_names[@]}"; do
+   if ! [[ "${vm_name}" =~ ^${PREFIX}-[0-9]+$ ]]; then
+     echo "ERROR: invalid VM name '${vm_name}' — expected format: ${PREFIX}-NN" >&2
+     had_errors=true
+@@ -101,22 +211,33 @@ for vm_name in "$@"; do
+   echo "==> Deleting ${vm_name}"
+ 
+   # ------------------------------------------------------------------
+-  # 1. Find the runner ID via the GitLab API
++  # 0. Drain in-flight jobs (SIGQUIT + runner-* containers)
++  # ------------------------------------------------------------------
++  if [ "${no_drain}" = "true" ]; then
++    echo "  skipping drain (--no-drain)"
++  else
++    export vm_name GCP_PROJECT GCP_ZONE GCP_USE_IAP GCP_KNOWN_HOSTS
++    drain_runner_vm gcp_drain_ssh "${RUNNER_USER}"
++  fi
++
++  # ------------------------------------------------------------------
++  # 1. Find the runner ID via the GitLab API (individual mode only)
+   # ------------------------------------------------------------------
+   runner_id=""
+   lookup_failed=false
+ 
+-  # Look up the runner by description via the GitLab API (paginated).
+-  # Uses /runners (user-scoped) instead of /runners/all (admin-only).
+-  encoded_tag=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "${RUNNER_TAG}")
+-  page=1
+-  while [ -z "${runner_id}" ] && [ "${page}" -le 50 ]; do
+-    if ! page_json=$(gl_curl \
+-      "${GITLAB_URL}/api/v4/runners?per_page=100&page=${page}&tag_list=${encoded_tag}" 2>/dev/null); then
+-      lookup_failed=true
+-      break
+-    fi
+-    runner_id=$(echo "${page_json}" | python3 -c "
++  if [ "${lookup_runners}" = "true" ]; then
++    # Look up the runner by description via the GitLab API (paginated).
++    # Uses /runners (user-scoped) instead of /runners/all (admin-only).
++    encoded_tag=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "${RUNNER_TAG}")
++    page=1
++    while [ -z "${runner_id}" ] && [ "${page}" -le 50 ]; do
++      if ! page_json=$(gl_curl \
++        "${GITLAB_URL}/api/v4/runners?per_page=100&page=${page}&tag_list=${encoded_tag}" 2>/dev/null); then
++        lookup_failed=true
++        break
++      fi
++      runner_id=$(echo "${page_json}" | python3 -c "
+ import sys, json
+ proj, vm = sys.argv[1], sys.argv[2]
+ runners = json.load(sys.stdin)
+@@ -126,22 +247,25 @@ for r in runners:
+         print(r['id'])
+         break
+ " "${GCP_PROJECT}" "${vm_name}" 2>/dev/null) || true
+-    [ -n "${runner_id}" ] && break
+-    count=$(echo "${page_json}" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null) || { lookup_failed=true; break; }
+-    [ "${count}" -lt 100 ] && break
+-    page=$((page + 1))
+-  done
+-
+-  if [ "${lookup_failed}" = true ]; then
+-    echo "  ERROR: GitLab API request failed — refusing to delete VM without deregistering runner" >&2
+-    echo "  Hint: check GL_TOKEN scopes (needs api + manage_runner) and network connectivity" >&2
+-    echo "  To force: manually deregister at ${GITLAB_URL}, then: gcloud compute instances delete ${vm_name} --project=${GCP_PROJECT} --zone=${GCP_ZONE} --quiet" >&2
+-    had_errors=true
+-    continue
++      [ -n "${runner_id}" ] && break
++      count=$(echo "${page_json}" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null) || { lookup_failed=true; break; }
++      [ "${count}" -lt 100 ] && break
++      page=$((page + 1))
++    done
++
++    if [ "${lookup_failed}" = "true" ]; then
++      echo "  ERROR: GitLab API request failed — refusing to delete VM without deregistering runner" >&2
++      echo "  Hint: check GL_TOKEN scopes (needs api + manage_runner) and network connectivity" >&2
++      echo "  To force: manually deregister at ${GITLAB_URL}, then: gcloud compute instances delete ${vm_name} --project=${GCP_PROJECT} --zone=${GCP_ZONE} --quiet" >&2
++      had_errors=true
++      continue
++    fi
++  else
++    echo "  skipping GitLab deregistration (fleet mode)"
+   fi
+ 
+   # ------------------------------------------------------------------
+-  # 2. Deregister from GitLab
++  # 2. Deregister from GitLab (only when a proj/vm match was found)
+   # ------------------------------------------------------------------
+   if [ -n "${runner_id}" ]; then
+     if gl_curl -X DELETE \
+@@ -153,7 +277,7 @@ for r in runners:
+       had_errors=true
+       continue
+     fi
+-  else
++  elif [ "${lookup_runners}" = "true" ]; then
+     echo "  WARN: no matching runner found — skipping deregistration"
+   fi
+ 
+@@ -173,7 +297,7 @@ for r in runners:
+   echo ""
+ done
+ 
+-if [ "${had_errors}" = true ]; then
++if [ "${had_errors}" = "true" ]; then
+   echo "Done (with errors — some VMs were skipped)."
+   exit 1
+ fi
+diff --git a/hack/gitlab-runner-vm/delete-openshift-vm.sh b/hack/gitlab-runner-vm/delete-openshift-vm.sh
+index 5ec7152b4b..dee497e5b1 100755
+--- a/hack/gitlab-runner-vm/delete-openshift-vm.sh
++++ b/hack/gitlab-runner-vm/delete-openshift-vm.sh
+@@ -1,28 +1,63 @@
+ #!/usr/bin/env bash
+ #
+-# delete-openshift-vm.sh — Delete a GitLab Runner VM from OpenShift and deregister it from GitLab.
++# delete-openshift-vm.sh — Drain and delete a GitLab Runner VM from OpenShift.
+ #
+ # This script:
+-#   1. Finds the runner by description via the GitLab API
+-#   2. Deregisters the runner from GitLab
+-#   3. Deletes the VirtualMachine from OpenShift (and its DataVolume)
++#   1. Drains the runner on each VM (SIGQUIT + wait for runner-*
++#      containers) unless --no-drain is set. Bounded by DRAIN_TIMEOUT_SEC
++#      (default 600s); on cap overrun, warns and proceeds.
++#   2. Deregisters the GitLab runner when this VM has its own registration
++#      (description matches NAMESPACE/vm-name). Skipped in fleet mode.
++#   3. Deletes the VirtualMachine from OpenShift (and its DataVolume).
++#
++# Two modes:
++#   Fleet (RUNNER_TOKEN is set, or no proj/vm runner match):
++#     Does not touch the shared fleet runner. GL_TOKEN is not required.
++#     GitLab prunes the offline system_id.
++#   Individual (GL_TOKEN is set and a proj/vm runner is found):
++#     Deregisters that runner, then deletes the VM. GL_TOKEN is required
++#     only when a deregistration will actually occur.
+ #
+ # Recreation (drain → delete → create) is the compliance path for runner
+ # VMs; in-place setup.sh re-run is a developer/debug convenience only.
+ # See issue #7257.
+ #
+ # Required environment variables:
+-#   GL_TOKEN    — GitLab personal access token
+-#   GITLAB_URL  — GitLab instance URL (e.g. https://gitlab.example.com)
+ #   NAMESPACE   — OpenShift namespace
+ #
++# Mode-specific environment variables:
++#   RUNNER_TOKEN — when set, skip GitLab deregistration (fleet mode).
++#   GL_TOKEN     — GitLab PAT (scopes: api + manage_runner). Required unless
++#                  RUNNER_TOKEN is set (fleet mode).
++#   GITLAB_URL   — GitLab instance URL. Required unless RUNNER_TOKEN is set.
++#
+ # Optional environment variables:
+-#   RUNNER_TAG  — runner tag used for registration (default: fullsend-gitlab-runner)
++#   RUNNER_TAG         — runner tag used for lookup (default: fullsend-gitlab-runner)
++#   VM_USER            — cloud-image login user (default: fedora)
++#   DRAIN_TIMEOUT_SEC  — drain cap in seconds (default: 600)
++#   RUNNER_USER        — Unix account gitlab-runner/podman run as on the VM
++#                        (setup.sh's RUNNER_USER, i.e. whichever identity ran
++#                        setup.sh). Used to drain as the correct identity when
++#                        it differs from VM_USER. Default: VM_USER.
++#
++# Arguments:
++#   --no-drain  — skip the drain step and delete immediately
++#   --list      — list runner VMs and exit
++#   <vm-name>   — one or more VMs (fullsend-gitlab-runner-NN)
+ #
+ # Usage:
++#   # Fleet VM (no GL_TOKEN):
++#   RUNNER_TOKEN=glrt-xxx NAMESPACE=my-ns \
++#     ./delete-openshift-vm.sh fullsend-gitlab-runner-01
++#
++#   # Individual runner:
+ #   GL_TOKEN=glpat-xxx GITLAB_URL=https://gitlab.example.com NAMESPACE=my-ns \
+ #     ./delete-openshift-vm.sh fullsend-gitlab-runner-01
+ #
++#   # Skip drain:
++#   GL_TOKEN=glpat-xxx GITLAB_URL=https://gitlab.example.com NAMESPACE=my-ns \
++#     ./delete-openshift-vm.sh --no-drain fullsend-gitlab-runner-01
++#
+ #   # List existing runner VMs:
+ #   NAMESPACE=my-ns ./delete-openshift-vm.sh --list
+ #
+@@ -31,19 +66,26 @@ set -euo pipefail
+ GITLAB_URL="${GITLAB_URL:-}"
+ NAMESPACE="${NAMESPACE:-}"
+ RUNNER_TAG="${RUNNER_TAG:-fullsend-gitlab-runner}"
++VM_USER="${VM_USER:-fedora}"
+ PREFIX="fullsend-gitlab-runner"
+ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++no_drain=false
+ 
+ # shellcheck source=lib.sh
+ source "${SCRIPT_DIR}/lib.sh"
+ 
+ usage() {
+-  echo "Usage: GL_TOKEN=glpat-xxx $0 <vm-name> [vm-name ...]"
+-  echo "       $0 --list"
++  echo "Usage: NAMESPACE=<ns> $0 [--no-drain] <vm-name> [vm-name ...]"
++  echo "       NAMESPACE=<ns> $0 --list"
++  echo ""
++  echo "Run '$0' with --help for details."
+ }
+ 
+ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+-  head -24 "$0" | tail -22 | sed 's/^# \?//'
++  # Extract the comment block after the shebang until the first non-comment
++  # line, stripping the leading "# " prefix.  This is immune to header edits
++  # (no hardcoded line numbers).
++  awk 'NR==1{next} /^[^#]/{exit} {sub(/^# ?/, ""); print}' "$0"
+   exit 0
+ fi
+ 
+@@ -58,38 +100,76 @@ if [ "${1:-}" = "--list" ]; then
+   exit 0
+ fi
+ 
+-if [ $# -eq 0 ]; then
+-  echo "ERROR: specify at least one VM name to delete" >&2
+-  usage >&2
++if [ -z "${NAMESPACE}" ]; then
++  echo "ERROR: NAMESPACE is required (OpenShift namespace)" >&2
+   exit 1
+ fi
+ 
+-if [ -z "${GL_TOKEN:-}" ]; then
+-  echo "ERROR: GL_TOKEN is required (GitLab personal access token)" >&2
++vm_names=()
++for arg in "$@"; do
++  if [ "${arg}" = "--no-drain" ]; then
++    no_drain=true
++  else
++    vm_names+=("${arg}")
++  fi
++done
++
++if [ "${#vm_names[@]}" -eq 0 ]; then
++  echo "ERROR: specify at least one VM name to delete" >&2
+   usage >&2
+   exit 1
+ fi
+-if ! [[ "${GL_TOKEN}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+-  echo "ERROR: GL_TOKEN contains invalid characters" >&2
+-  exit 1
+-fi
+ 
+-if [ -z "${GITLAB_URL}" ]; then
+-  echo "ERROR: GITLAB_URL is required (e.g. https://gitlab.example.com)" >&2
++if ! [[ "${VM_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
++  echo "ERROR: VM_USER must be a plain Unix user name (got: ${VM_USER})" >&2
+   exit 1
+ fi
+-if ! [[ "${GITLAB_URL}" =~ ^https://[a-zA-Z0-9._-]+(:[0-9]+)?$ ]]; then
+-  echo "ERROR: GITLAB_URL must start with https:// (got: ${GITLAB_URL})" >&2
++
++RUNNER_USER="${RUNNER_USER:-${VM_USER}}"
++if ! [[ "${RUNNER_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
++  echo "ERROR: RUNNER_USER must be a plain Unix user name (got: ${RUNNER_USER})" >&2
+   exit 1
+ fi
+ 
+-if [ -z "${NAMESPACE}" ]; then
+-  echo "ERROR: NAMESPACE is required (OpenShift namespace)" >&2
++# GL_TOKEN is required unless RUNNER_TOKEN signals fleet mode. Fleet mode
++# never deregisters, so it never needs GitLab credentials. Otherwise we must
++# be able to look up a proj/vm match before deciding whether to deregister —
++# omitting GL_TOKEN is not itself authorization to skip deregistration.
++lookup_runners=false
++if uses_runner_token; then
++  :
++elif [ -n "${GL_TOKEN:-}" ]; then
++  if ! [[ "${GL_TOKEN}" =~ ^[A-Za-z0-9._-]+$ ]]; then
++    echo "ERROR: GL_TOKEN contains invalid characters" >&2
++    exit 1
++  fi
++  if [ -z "${GITLAB_URL}" ]; then
++    echo "ERROR: GITLAB_URL is required (e.g. https://gitlab.example.com)" >&2
++    exit 1
++  fi
++  if ! [[ "${GITLAB_URL}" =~ ^https://[a-zA-Z0-9._-]+(:[0-9]+)?$ ]]; then
++    echo "ERROR: GITLAB_URL must start with https:// (got: ${GITLAB_URL})" >&2
++    exit 1
++  fi
++  lookup_runners=true
++else
++  echo "ERROR: GL_TOKEN is required unless RUNNER_TOKEN is set (fleet mode)" >&2
++  echo "  Hint: set RUNNER_TOKEN for a fleet VM, or GL_TOKEN + GITLAB_URL to look up and deregister an individually-registered runner" >&2
+   exit 1
+ fi
+ 
++# SSH helper for drain_runner_vm. Reads vm_name, NAMESPACE, and VM_USER
++# from the environment (exported before drain_runner_vm).
++ocp_drain_ssh() {
++  virtctl -n "${NAMESPACE}" ssh "${VM_USER}"@vm/"${vm_name}" \
++    -t "-o StrictHostKeyChecking=no" \
++    -t "-o UserKnownHostsFile=/dev/null" \
++    -t "-o ConnectTimeout=10" \
++    -c "$1"
++}
++
+ had_errors=false
+-for vm_name in "$@"; do
++for vm_name in "${vm_names[@]}"; do
+   if ! [[ "${vm_name}" =~ ^${PREFIX}-[0-9]+$ ]]; then
+     echo "ERROR: invalid VM name '${vm_name}' — expected format: ${PREFIX}-NN" >&2
+     had_errors=true
+@@ -99,22 +179,33 @@ for vm_name in "$@"; do
+   echo "==> Deleting ${vm_name}"
+ 
+   # ------------------------------------------------------------------
+-  # 1. Find the runner ID via the GitLab API
++  # 0. Drain in-flight jobs (SIGQUIT + runner-* containers)
++  # ------------------------------------------------------------------
++  if [ "${no_drain}" = "true" ]; then
++    echo "  skipping drain (--no-drain)"
++  else
++    export vm_name NAMESPACE VM_USER
++    drain_runner_vm ocp_drain_ssh "${RUNNER_USER}"
++  fi
++
++  # ------------------------------------------------------------------
++  # 1. Find the runner ID via the GitLab API (individual mode only)
+   # ------------------------------------------------------------------
+   runner_id=""
+   lookup_failed=false
+ 
+-  # Look up the runner by description via the GitLab API (paginated).
+-  # Uses /runners (user-scoped) instead of /runners/all (admin-only).
+-  encoded_tag=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "${RUNNER_TAG}")
+-  page=1
+-  while [ -z "${runner_id}" ] && [ "${page}" -le 50 ]; do
+-    if ! page_json=$(gl_curl \
+-      "${GITLAB_URL}/api/v4/runners?per_page=100&page=${page}&tag_list=${encoded_tag}" 2>/dev/null); then
+-      lookup_failed=true
+-      break
+-    fi
+-    runner_id=$(echo "${page_json}" | python3 -c "
++  if [ "${lookup_runners}" = "true" ]; then
++    # Look up the runner by description via the GitLab API (paginated).
++    # Uses /runners (user-scoped) instead of /runners/all (admin-only).
++    encoded_tag=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "${RUNNER_TAG}")
++    page=1
++    while [ -z "${runner_id}" ] && [ "${page}" -le 50 ]; do
++      if ! page_json=$(gl_curl \
++        "${GITLAB_URL}/api/v4/runners?per_page=100&page=${page}&tag_list=${encoded_tag}" 2>/dev/null); then
++        lookup_failed=true
++        break
++      fi
++      runner_id=$(echo "${page_json}" | python3 -c "
+ import sys, json
+ ns, vm = sys.argv[1], sys.argv[2]
+ runners = json.load(sys.stdin)
+@@ -124,22 +215,25 @@ for r in runners:
+         print(r['id'])
+         break
+ " "${NAMESPACE}" "${vm_name}" 2>/dev/null) || true
+-    [ -n "${runner_id}" ] && break
+-    count=$(echo "${page_json}" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null) || { lookup_failed=true; break; }
+-    [ "${count}" -lt 100 ] && break
+-    page=$((page + 1))
+-  done
+-
+-  if [ "${lookup_failed}" = true ]; then
+-    echo "  ERROR: GitLab API request failed — refusing to delete VM without deregistering runner" >&2
+-    echo "  Hint: check GL_TOKEN scopes (needs api + manage_runner) and network connectivity" >&2
+-    echo "  To force: manually deregister at ${GITLAB_URL}, then: oc -n ${NAMESPACE} delete vm -- ${vm_name}" >&2
+-    had_errors=true
+-    continue
++      [ -n "${runner_id}" ] && break
++      count=$(echo "${page_json}" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null) || { lookup_failed=true; break; }
++      [ "${count}" -lt 100 ] && break
++      page=$((page + 1))
++    done
++
++    if [ "${lookup_failed}" = "true" ]; then
++      echo "  ERROR: GitLab API request failed — refusing to delete VM without deregistering runner" >&2
++      echo "  Hint: check GL_TOKEN scopes (needs api + manage_runner) and network connectivity" >&2
++      echo "  To force: manually deregister at ${GITLAB_URL}, then: oc -n ${NAMESPACE} delete vm -- ${vm_name}" >&2
++      had_errors=true
++      continue
++    fi
++  else
++    echo "  skipping GitLab deregistration (fleet mode)"
+   fi
+ 
+   # ------------------------------------------------------------------
+-  # 2. Deregister from GitLab
++  # 2. Deregister from GitLab (only when a proj/vm match was found)
+   # ------------------------------------------------------------------
+   if [ -n "${runner_id}" ]; then
+     if gl_curl -X DELETE \
+@@ -151,7 +245,7 @@ for r in runners:
+       had_errors=true
+       continue
+     fi
+-  else
++  elif [ "${lookup_runners}" = "true" ]; then
+     echo "  WARN: no matching runner found — skipping deregistration"
+   fi
+ 
+@@ -185,7 +279,7 @@ for r in runners:
+   echo ""
+ done
+ 
+-if [ "${had_errors}" = true ]; then
++if [ "${had_errors}" = "true" ]; then
+   echo "Done (with errors — some VMs were skipped)."
+   exit 1
+ fi
+diff --git a/hack/gitlab-runner-vm/lib.sh b/hack/gitlab-runner-vm/lib.sh
+index 1e7a57d9e1..22a6d67b75 100644
+--- a/hack/gitlab-runner-vm/lib.sh
++++ b/hack/gitlab-runner-vm/lib.sh
+@@ -3,7 +3,8 @@
+ # lib.sh — Shared helpers for GitLab Runner VM provisioning scripts.
+ #
+ # Source this file at the top of any script that needs gl_curl(),
+-# validate_runner_scope(), build_scope_args(), or uses_runner_token().
++# validate_runner_scope(), build_scope_args(), uses_runner_token(),
++# or drain_runner_vm().
+ 
+ # uses_runner_token reports whether RUNNER_TOKEN is set, selecting the
+ # join-existing-pool (runner-hub) path over GitLab API registration.
+@@ -85,3 +86,227 @@ build_scope_args() {
+     )
+   fi
+ }
++
++# drain_runner_vm <remote_exec_fn> [runner_user]
++#
++# Gracefully stop the GitLab runner on a VM so it stops accepting new jobs
++# and in-flight jobs can finish, then return. Policy is drain-then-proceed:
++# operational failures and cap overruns warn and return 0 so the caller can
++# delete or recreate the VM instead of hanging forever.
++#
++# remote_exec_fn is the name of a function that takes a single command string
++# and runs it on the VM over the caller's SSH plumbing (virtctl ssh, or
++# gcloud compute ssh --tunnel-through-iap). stdout of the remote command is
++# captured; the function must put diagnostics on stderr.
++#
++# runner_user, when given, is the Unix account gitlab-runner/podman run as on
++# the VM (setup.sh's RUNNER_USER — it chowns /etc/gitlab-runner to this user
++# and runs the rootless podman socket as it). The config edit and the podman
++# query then run as that identity via `sudo -u`, instead of relying on the
++# identity the caller's SSH plumbing happens to connect as: for GCP in
++# particular there is no equivalent of OpenShift's pinned VM_USER, so a
++# different operator draining/deleting a VM than the one who created it can
++# connect as a different identity. Without runner_user, the config edit
++# still runs via plain sudo (root can always write the file regardless of
++# owner), restoring the file's pre-edit owner/mode afterward since `sed -i`
++# rewrites through a new inode owned by root:root otherwise; the podman
++# query falls back to running as the connecting identity and can
++# under-report (wrong rootless namespace) if that identity differs from the
++# one gitlab-runner actually runs as.
++#
++# Idle is detected by watching per-job runner-* containers (podman ps) AND
++# confirming gitlab-runner.service is no longer active, not process exit or
++# an empty container list alone: gitlab-runner's shutdown_timeout=0 only
++# waits ~30s, so the process can exit while a job container is still
++# running, and a job still in `podman pull`/prepare_exec (before it has
++# created its runner-${JOB_ID} container) shows an empty `podman ps` while
++# the service is still very much active. Idle therefore requires both no
++# leftover runner-* containers AND gitlab-runner.service reporting anything
++# other than "active", bounded throughout by DRAIN_TIMEOUT_SEC.
++#
++# The remote side sends SIGQUIT (not systemctl stop, which trips Fedora's
++# 45s TimeoutStopUSec abort) and runtime-masks the unit so Restart=always
++# does not bring the runner back mid-drain. shutdown_timeout is raised to
++# the drain cap so SIGQUIT does not kill the job at the ~30s default.
++#
++# Every remote_exec call (the initial signal, and each poll) runs under a
++# command-level timeout bounded by the remaining drain budget, so a hung SSH
++# session after connect cannot block the drain past DRAIN_TIMEOUT_SEC. A
++# failed poll (SSH/IAP transport blip, virtctl hiccup) warns and retries on
++# the next poll interval rather than proceeding immediately — only the
++# overall DRAIN_TIMEOUT_SEC cap gives up early, so a single transient error
++# does not delete a VM with a job still running.
++#
++# Env:
++#   DRAIN_TIMEOUT_SEC — cap in seconds (default 600). Non-numeric values
++#                       fall back to 600.
++#   DRAIN_POLL_SEC    — poll interval in seconds (default 5). Used by tests.
++drain_runner_vm() {
++  local remote_exec="$1"
++  local runner_user="${2:-}"
++  local timeout_sec poll_sec cmd_timeout start now elapsed remaining rc
++  local remote_cmd sudo_prefix ps_cmd poll_output containers svc_status
++
++  if [ -z "${remote_exec}" ]; then
++    echo "ERROR: drain_runner_vm requires a remote exec function" >&2
++    return 1
++  fi
++
++  if [ -n "${runner_user}" ] && ! [[ "${runner_user}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
++    echo "ERROR: drain_runner_vm: runner_user must be a plain Unix user name (got: ${runner_user})" >&2
++    return 1
++  fi
++
++  timeout_sec="${DRAIN_TIMEOUT_SEC:-600}"
++  if ! [[ "${timeout_sec}" =~ ^[0-9]+$ ]]; then
++    timeout_sec=600
++  fi
++  poll_sec="${DRAIN_POLL_SEC:-5}"
++  if ! [[ "${poll_sec}" =~ ^[0-9]+$ ]] || [ "${poll_sec}" -lt 1 ]; then
++    poll_sec=5
++  fi
++
++  echo "  draining runner (cap ${timeout_sec}s)..."
++
++  sudo_prefix="sudo"
++  if [ -n "${runner_user}" ]; then
++    sudo_prefix="sudo -u ${runner_user}"
++  fi
++
++  # Expand timeout_sec/sudo_prefix into the remote script; everything else
++  # is literal. The remote script tracks per-step failures in $status and
++  # exits non-zero if any of them fail, so an in-guest signal failure is
++  # caught by the same rc check below as a transport failure — this used to
++  # end with an unconditional "true", so a fully-failed drain could still
++  # report success.
++  #
++  # Without runner_user, the config edit runs via plain `sudo`, whose
++  # `sed -i` rewrites the file through a new inode owned by root:root —
++  # clobbering setup.sh's chown of /etc/gitlab-runner to RUNNER_USER, which
++  # the gitlab-runner service (User=${RUNNER_USER}) needs to keep reading
++  # its own config. Stat the pre-edit owner/mode and restore them after the
++  # sed calls so a plain-sudo edit does not change who owns the file.
++  if [ -n "${runner_user}" ]; then
++    remote_cmd=$(cat <<EOF
++status=0
++cfg=/etc/gitlab-runner/config.toml
++if ${sudo_prefix} test -f "\$cfg"; then
++  ${sudo_prefix} sed -i '/^shutdown_timeout/d' "\$cfg" || status=1
++  ${sudo_prefix} sed -i '1i shutdown_timeout = ${timeout_sec}' "\$cfg" || status=1
++fi
++sudo systemctl kill --kill-whom=main -s HUP gitlab-runner.service >/dev/null 2>&1 || status=1
++sudo systemctl mask --runtime gitlab-runner.service >/dev/null 2>&1 || status=1
++sudo systemctl kill --kill-whom=main -s QUIT gitlab-runner.service >/dev/null 2>&1 || status=1
++exit "\$status"
++EOF
++)
++  else
++    remote_cmd=$(cat <<EOF
++status=0
++cfg=/etc/gitlab-runner/config.toml
++if sudo test -f "\$cfg"; then
++  cfg_owner=\$(sudo stat -c '%U:%G' "\$cfg" 2>/dev/null) || cfg_owner=""
++  cfg_mode=\$(sudo stat -c '%a' "\$cfg" 2>/dev/null) || cfg_mode=""
++  sudo sed -i '/^shutdown_timeout/d' "\$cfg" || status=1
++  sudo sed -i '1i shutdown_timeout = ${timeout_sec}' "\$cfg" || status=1
++  if [ -n "\$cfg_owner" ]; then
++    sudo chown "\$cfg_owner" "\$cfg" || status=1
++  fi
++  if [ -n "\$cfg_mode" ]; then
++    sudo chmod "\$cfg_mode" "\$cfg" || status=1
++  fi
++fi
++sudo systemctl kill --kill-whom=main -s HUP gitlab-runner.service >/dev/null 2>&1 || status=1
++sudo systemctl mask --runtime gitlab-runner.service >/dev/null 2>&1 || status=1
++sudo systemctl kill --kill-whom=main -s QUIT gitlab-runner.service >/dev/null 2>&1 || status=1
++exit "\$status"
++EOF
++)
++  fi
++
++  # The poll command reports both leftover runner-* containers and whether
++  # gitlab-runner.service is still active, so idle detection (below) can
++  # require both signals instead of trusting an empty container list alone.
++  # `podman ps` failures propagate through $status (a real transport/podman
++  # problem); `systemctl is-active`'s own non-zero exit for inactive/failed
++  # units is deliberately swallowed so it never masks a podman failure.
++  if [ -n "${runner_user}" ]; then
++    ps_cmd="status=0; containers=\$(sudo -u ${runner_user} podman ps --format '{{.Names}}') || status=1; svc=\$(systemctl is-active gitlab-runner.service 2>/dev/null || true); printf '%s\n' \"\${containers}\"; printf '__SVC__%s\n' \"\${svc}\"; exit \"\${status}\""
++  else
++    ps_cmd="status=0; containers=\$(podman ps --format '{{.Names}}') || status=1; svc=\$(systemctl is-active gitlab-runner.service 2>/dev/null || true); printf '%s\n' \"\${containers}\"; printf '__SVC__%s\n' \"\${svc}\"; exit \"\${status}\""
++  fi
++
++  # A DURATION of 0 disables GNU timeout's cap entirely, so floor the
++  # command-level timeout at 1s (the overall drain-cap checks below still
++  # use the real timeout_sec, including 0).
++  cmd_timeout="${timeout_sec}"
++  if [ "${cmd_timeout}" -lt 1 ]; then
++    cmd_timeout=1
++  fi
++
++  # remote_exec is a shell function (gcp_drain_ssh / ocp_drain_ssh), not an
++  # executable on PATH, so `timeout N "${remote_exec}"` can't exec it
++  # directly. Export it and run it through `bash -c` instead, which inherits
++  # exported functions from the environment; timeout then bounds that bash
++  # process.
++  if declare -F "${remote_exec}" >/dev/null 2>&1; then
++    # shellcheck disable=SC2163  # exports the function named by $remote_exec, not the variable itself
++    export -f "${remote_exec}"
++  fi
++
++  start=$(date +%s)
++  rc=0
++  timeout "${cmd_timeout}" bash -c '"$0" "$1"' "${remote_exec}" "${remote_cmd}" || rc=$?
++  if [ "${rc}" -ne 0 ]; then
++    echo "  WARN: drain signal failed (exit ${rc}) — polling for idle anyway" >&2
++  fi
++
++  while true; do
++    now=$(date +%s)
++    elapsed=$(( now - start ))
++    if [ "${elapsed}" -ge "${timeout_sec}" ]; then
++      echo "  WARN: drain cap ${timeout_sec}s reached — proceeding" >&2
++      return 0
++    fi
++    remaining=$(( timeout_sec - elapsed ))
++    cmd_timeout="${remaining}"
++    if [ "${cmd_timeout}" -lt 1 ]; then
++      cmd_timeout=1
++    fi
++
++    rc=0
++    poll_output=$(timeout "${cmd_timeout}" bash -c '"$0" "$1"' "${remote_exec}" "${ps_cmd}" 2>/dev/null) || rc=$?
++    if [ "${rc}" -ne 0 ]; then
++      # A transport blip (SSH/IAP reconnect, virtctl hiccup) does not mean
++      # the job is done — retry on the next poll interval instead of
++      # proceeding immediately, so a single failure cannot short-circuit
++      # the drain. The cap check above still bounds total retry time.
++      echo "  WARN: drain poll failed (exit ${rc}) — retrying" >&2
++    else
++      svc_status=$(printf '%s\n' "${poll_output}" | grep '^__SVC__' | sed 's/^__SVC__//' || true)
++      containers=$(printf '%s\n' "${poll_output}" | grep '^runner-' || true)
++      # Idle requires both no leftover runner-* containers AND the service
++      # reporting anything other than "active" — an empty container list
++      # alone (e.g. a job still in podman pull/prepare_exec, before its
++      # runner-${JOB_ID} container exists) must not be treated as idle
++      # while gitlab-runner.service is still running.
++      if [ -z "${containers}" ] && [ "${svc_status}" != "active" ]; then
++        echo "  OK: runner idle"
++        return 0
++      fi
++    fi
++
++    now=$(date +%s)
++    elapsed=$(( now - start ))
++    if [ "${elapsed}" -ge "${timeout_sec}" ]; then
++      echo "  WARN: drain cap ${timeout_sec}s reached — proceeding" >&2
++      return 0
++    fi
++    remaining=$(( timeout_sec - elapsed ))
++    if [ "${remaining}" -lt "${poll_sec}" ]; then
++      sleep "${remaining}"
++    else
++      sleep "${poll_sec}"
++    fi
++  done
++}
+diff --git a/hack/gitlab-runner-vm/lib_test.sh b/hack/gitlab-runner-vm/lib_test.sh
+index 234375df09..84e6f1835b 100755
+--- a/hack/gitlab-runner-vm/lib_test.sh
++++ b/hack/gitlab-runner-vm/lib_test.sh
+@@ -11,6 +11,8 @@ source "${SCRIPT_DIR}/lib.sh"
+ 
+ CREATE_GCP="${SCRIPT_DIR}/create-gcp-vm.sh"
+ CREATE_OCP="${SCRIPT_DIR}/create-openshift-vm.sh"
++DELETE_GCP="${SCRIPT_DIR}/delete-gcp-vm.sh"
++DELETE_OCP="${SCRIPT_DIR}/delete-openshift-vm.sh"
+ FAILURES=0
+ 
+ pass() { echo "ok       $*"; }
+@@ -176,7 +178,336 @@ assert_succeeds_with \
+   "Join an existing runner pool" \
+   with_clean_env bash "${CREATE_OCP}" --help
+ 
++echo "== delete script validation =="
++# Neither RUNNER_TOKEN nor GL_TOKEN must fail closed — omitting GL_TOKEN is
++# not authorization to skip deregistration (Issue #7257 fail-open finding).
++assert_fails_with \
++  "delete-gcp-vm.sh: neither RUNNER_TOKEN nor GL_TOKEN fails closed" \
++  "GL_TOKEN is required unless RUNNER_TOKEN is set" \
++  with_clean_env GCP_PROJECT=my-gcp-project bash "${DELETE_GCP}" fullsend-gitlab-runner-01
++
++assert_fails_with \
++  "delete-openshift-vm.sh: neither RUNNER_TOKEN nor GL_TOKEN fails closed" \
++  "GL_TOKEN is required unless RUNNER_TOKEN is set" \
++  with_clean_env NAMESPACE=my-namespace bash "${DELETE_OCP}" fullsend-gitlab-runner-01
++
++echo "== drain_runner_vm =="
++
++# drain_runner_vm bounds every remote_exec call with `timeout`, which execs
++# a real program and cannot invoke a shell function directly — it must run
++# each mock (and, in production, gcp_drain_ssh/ocp_drain_ssh) via
++# `export -f` + `bash -c`. Each such call is therefore a fresh subprocess:
++# mocks below that need to remember state across calls (poll-fail,
++# cap-overrun) use a counter file rather than an in-memory variable.
++
++assert_fails_with \
++  "drain_runner_vm: missing remote_exec fn" \
++  "requires a remote exec function" \
++  drain_runner_vm ""
++
++# drain_runner_vm interpolates runner_user unquoted into remote shell
++# command strings, so it must validate the value itself (the same Unix
++# username regex both callers already enforce before calling it) rather
++# than trusting every future caller to have validated first.
++drain_noop_mock() { return 0; }
++assert_fails_with \
++  "drain_runner_vm: rejects invalid runner_user" \
++  "runner_user must be a plain Unix user name" \
++  drain_runner_vm drain_noop_mock "fedora; rm -rf /"
++
++# drain_idle_mock: succeeds every call and never reports a runner-*
++# container, so drain_runner_vm should detect idle on the first poll.
++drain_idle_mock() { return 0; }
++
++DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 assert_succeeds_with \
++  "drain_runner_vm: idle on first poll reports OK" \
++  "OK: runner idle" \
++  drain_runner_vm drain_idle_mock
++
++# drain_signal_fail_mock: the drain-signal call itself fails (covers both a
++# transport failure and, since the remote script now propagates in-guest
++# systemctl/config-edit failures via its own exit status, a fully-failed
++# in-guest drain). drain_runner_vm warns, then falls through to the poll
++# loop (in case the runner is already draining despite the signal error).
++# The mock fails every call, so every poll fails too and drain-then-proceed
++# policy kicks in once the (short, for test speed) cap is reached. Assert
++# on both WARN messages.
++drain_signal_fail_mock() { return 1; }
++
++DRAIN_TIMEOUT_SEC=2 DRAIN_POLL_SEC=1 assert_succeeds_with \
++  "drain_runner_vm: signal failure warns and still polls" \
++  "polling for idle anyway" \
++  drain_runner_vm drain_signal_fail_mock
++
++# drain_poll_fail_mock: signal succeeds, but every poll after that fails
++# (a persistent transport failure, not a transient blip). drain_runner_vm
++# must retry within the drain budget rather than proceeding on the very
++# first failed poll (a single SSH/IAP blip must not delete a VM with a job
++# still running) — it should only give up once DRAIN_TIMEOUT_SEC is
++# reached. Counter lives in a file (DRAIN_POLL_FAIL_COUNTER) since
++# drain_runner_vm runs every remote_exec call (including this mock) via
++# `export -f` + `bash -c` under `timeout`, so each call is a separate
++# subprocess and an in-memory counter would not persist across calls.
++DRAIN_POLL_FAIL_COUNTER=$(mktemp)
++echo 0 > "${DRAIN_POLL_FAIL_COUNTER}"
++drain_poll_fail_mock() {
++  local n
++  n=$(( $(cat "${DRAIN_POLL_FAIL_COUNTER}") + 1 ))
++  echo "${n}" > "${DRAIN_POLL_FAIL_COUNTER}"
++  if [ "${n}" -eq 1 ]; then
++    return 0
++  fi
++  return 1
++}
++export DRAIN_POLL_FAIL_COUNTER
++DRAIN_TIMEOUT_SEC=2 DRAIN_POLL_SEC=1 \
++  output=$(drain_runner_vm drain_poll_fail_mock 2>&1) && rc=0 || rc=$?
++if [ "${rc}" -eq 0 ] \
++  && printf '%s' "${output}" | grep -Fq "WARN: drain poll failed" \
++  && printf '%s' "${output}" | grep -Fq "WARN: drain cap 2s reached"; then
++  pass "drain_runner_vm: persistent poll failure retries then gives up at cap"
++else
++  fail "drain_runner_vm: persistent poll failure did not retry to the cap"
++  printf '%s\n' "${output}" | tail -5 >&2
++fi
++rm -f "${DRAIN_POLL_FAIL_COUNTER}"
++unset DRAIN_POLL_FAIL_COUNTER
++
++# drain_transient_poll_fail_mock: the first poll fails (a transient blip),
++# but the second succeeds and reports idle. A retry-then-proceed-on-cap
++# implementation that instead proceeds immediately on the first failure
++# would never see the recovered idle state — assert both that the WARN
++# fires and that "OK: runner idle" is reached without hitting the cap.
++DRAIN_TRANSIENT_COUNTER=$(mktemp)
++echo 0 > "${DRAIN_TRANSIENT_COUNTER}"
++drain_transient_poll_fail_mock() {
++  local n
++  n=$(( $(cat "${DRAIN_TRANSIENT_COUNTER}") + 1 ))
++  echo "${n}" > "${DRAIN_TRANSIENT_COUNTER}"
++  if [ "${n}" -eq 2 ]; then
++    return 1
++  fi
++  return 0
++}
++export DRAIN_TRANSIENT_COUNTER
++DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 \
++  output=$(drain_runner_vm drain_transient_poll_fail_mock 2>&1) && rc=0 || rc=$?
++if [ "${rc}" -eq 0 ] \
++  && printf '%s' "${output}" | grep -Fq "WARN: drain poll failed" \
++  && printf '%s' "${output}" | grep -Fq "OK: runner idle" \
++  && ! printf '%s' "${output}" | grep -Fq "drain cap"; then
++  pass "drain_runner_vm: transient poll failure retries instead of proceeding immediately"
++else
++  fail "drain_runner_vm: transient poll failure did not retry within the drain budget"
++  printf '%s\n' "${output}" | tail -5 >&2
++fi
++rm -f "${DRAIN_TRANSIENT_COUNTER}"
++unset DRAIN_TRANSIENT_COUNTER
++
++# drain_service_active_mock: podman ps is empty on the very first poll (a
++# job still in `podman pull`/prepare_exec, before it has created its
++# runner-${JOB_ID} container) but gitlab-runner.service is still reported
++# active — a genuine "still shutting down" case, not idle. Idle-detection
++# that short-circuits on an empty container list alone would report idle
++# on the first poll (n=2); this mock only reports the service inactive
++# starting on the second poll (n=3), so the counter must reach 3 before
++# "OK: runner idle" appears.
++DRAIN_SVC_ACTIVE_COUNTER=$(mktemp)
++echo 0 > "${DRAIN_SVC_ACTIVE_COUNTER}"
++drain_service_active_mock() {
++  local n
++  n=$(( $(cat "${DRAIN_SVC_ACTIVE_COUNTER}") + 1 ))
++  echo "${n}" > "${DRAIN_SVC_ACTIVE_COUNTER}"
++  if [ "${n}" -eq 1 ]; then
++    return 0
++  fi
++  if [ "${n}" -eq 2 ]; then
++    printf '__SVC__active\n'
++    return 0
++  fi
++  printf '__SVC__inactive\n'
++  return 0
++}
++export DRAIN_SVC_ACTIVE_COUNTER
++DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 \
++  output=$(drain_runner_vm drain_service_active_mock 2>&1) && rc=0 || rc=$?
++polls=$(cat "${DRAIN_SVC_ACTIVE_COUNTER}")
++if [ "${rc}" -eq 0 ] \
++  && printf '%s' "${output}" | grep -Fq "OK: runner idle" \
++  && [ "${polls}" -ge 3 ]; then
++  pass "drain_runner_vm: empty podman ps while service active is not idle on first poll"
++else
++  fail "drain_runner_vm: idle-detection short-circuited on empty podman ps without confirming the service stopped"
++  printf '%s\n' "${output}" | tail -5 >&2
++fi
++rm -f "${DRAIN_SVC_ACTIVE_COUNTER}"
++unset DRAIN_SVC_ACTIVE_COUNTER
++
++# drain_cap_overrun_mock: signal succeeds, podman always reports a
++# runner-* container still running — the cap must still be honored.
++DRAIN_CAP_OVERRUN_COUNTER=$(mktemp)
++echo 0 > "${DRAIN_CAP_OVERRUN_COUNTER}"
++drain_cap_overrun_mock() {
++  local n
++  n=$(( $(cat "${DRAIN_CAP_OVERRUN_COUNTER}") + 1 ))
++  echo "${n}" > "${DRAIN_CAP_OVERRUN_COUNTER}"
++  if [ "${n}" -eq 1 ]; then
++    return 0
++  fi
++  echo "runner-abc123"
++  return 0
++}
++export DRAIN_CAP_OVERRUN_COUNTER
++DRAIN_TIMEOUT_SEC=1 DRAIN_POLL_SEC=1 assert_succeeds_with \
++  "drain_runner_vm: cap overrun warns and proceeds" \
++  "WARN: drain cap 1s reached" \
++  drain_runner_vm drain_cap_overrun_mock
++rm -f "${DRAIN_CAP_OVERRUN_COUNTER}"
++unset DRAIN_CAP_OVERRUN_COUNTER
++
++# Non-numeric DRAIN_TIMEOUT_SEC / DRAIN_POLL_SEC must fall back to the
++# documented defaults rather than being passed through to `test`/`timeout`.
++DRAIN_TIMEOUT_SEC=notanumber DRAIN_POLL_SEC=1 assert_succeeds_with \
++  "drain_runner_vm: non-numeric DRAIN_TIMEOUT_SEC falls back to 600" \
++  "cap 600s" \
++  drain_runner_vm drain_idle_mock
++
++DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=-1 assert_succeeds_with \
++  "drain_runner_vm: negative DRAIN_POLL_SEC falls back to 5 (still idles fine)" \
++  "OK: runner idle" \
++  drain_runner_vm drain_idle_mock
++
++# runner_user, when passed, must thread sudo -u into both the podman query
++# and the remote config edit — not just rely on whichever identity the
++# caller's SSH plumbing happens to connect as.
++DRAIN_CAPTURE_FILE=$(mktemp)
++drain_capture_mock() {
++  printf '%s\n' "$1" >> "${DRAIN_CAPTURE_FILE}"
++  return 0
++}
++export DRAIN_CAPTURE_FILE
++DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 drain_runner_vm drain_capture_mock "fedora" >/dev/null 2>&1
++if grep -Fq "sudo -u fedora podman ps" "${DRAIN_CAPTURE_FILE}" \
++  && grep -Fq "sudo -u fedora test -f" "${DRAIN_CAPTURE_FILE}" \
++  && grep -Fq "sudo -u fedora sed -i" "${DRAIN_CAPTURE_FILE}"; then
++  pass "drain_runner_vm: runner_user threads sudo -u into podman query and config edit"
++else
++  fail "drain_runner_vm: runner_user not threaded into remote commands"
++  cat "${DRAIN_CAPTURE_FILE}" >&2
++fi
++: > "${DRAIN_CAPTURE_FILE}"
++
++DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 drain_runner_vm drain_capture_mock >/dev/null 2>&1
++if grep -Fq "podman ps" "${DRAIN_CAPTURE_FILE}" && ! grep -Fq "sudo -u" "${DRAIN_CAPTURE_FILE}"; then
++  pass "drain_runner_vm: without runner_user, remote commands have no sudo -u"
++else
++  fail "drain_runner_vm: expected no 'sudo -u' when runner_user is unset"
++  cat "${DRAIN_CAPTURE_FILE}" >&2
++fi
++
++# Without runner_user, the config edit runs via plain `sudo`, whose `sed -i`
++# rewrites config.toml through a new inode owned by root:root — clobbering
++# setup.sh's chown of /etc/gitlab-runner to RUNNER_USER. drain_runner_vm
++# must stat the pre-edit owner/mode and restore them via `sudo chown`/`sudo
++# chmod` after the sed calls. This regression check pins that restore so a
++# later removal of the chown/chmod lines fails a test instead of silently
++# reintroducing the root:root ownership bug.
++if grep -Fq "stat -c '%U:%G'" "${DRAIN_CAPTURE_FILE}" \
++  && grep -Fq "stat -c '%a'" "${DRAIN_CAPTURE_FILE}" \
++  && grep -Fq "sudo chown" "${DRAIN_CAPTURE_FILE}" \
++  && grep -Fq "sudo chmod" "${DRAIN_CAPTURE_FILE}"; then
++  pass "drain_runner_vm: without runner_user, config ownership/mode is stat'd and restored"
++else
++  fail "drain_runner_vm: expected stat+chown+chmod ownership restore when runner_user is unset"
++  cat "${DRAIN_CAPTURE_FILE}" >&2
++fi
++rm -f "${DRAIN_CAPTURE_FILE}"
++unset DRAIN_CAPTURE_FILE
++
++# drain_runner_vm runs remote_exec via `export -f` + `timeout ... bash -c`,
++# so the function body executes in a subprocess. Variables the function
++# closes over must be exported by the caller — otherwise they're empty
++# in the subprocess. This test verifies that a mock closing over an outer
++# variable can see it when run through drain_runner_vm's timeout+bash-c
++# mechanism.
++DRAIN_CLOSURE_MARKER="closure-ok-$(date +%s)"
++export DRAIN_CLOSURE_MARKER
++drain_closure_mock() {
++  if [ -z "${DRAIN_CLOSURE_MARKER:-}" ]; then
++    echo "CLOSURE_EMPTY" >&2
++    return 1
++  fi
++  echo "${DRAIN_CLOSURE_MARKER}"
++  return 0
++}
++# shellcheck disable=SC2034  # DRAIN_TIMEOUT_SEC/DRAIN_POLL_SEC consumed by drain_runner_vm
++DRAIN_TIMEOUT_SEC=5 DRAIN_POLL_SEC=1 \
++  output=$(drain_runner_vm drain_closure_mock 2>&1) && rc=0 || rc=$?
++if printf '%s' "${output}" | grep -Fq "OK: runner idle"; then
++  pass "drain_runner_vm: exported closure variables visible in timeout+bash-c subprocess"
++else
++  fail "drain_runner_vm: closure variable not visible in subprocess"
++  printf '%s\n' "${output}" | tail -5 >&2
++fi
++unset DRAIN_CLOSURE_MARKER
++
+ echo "== static regressions =="
++
++# drain_runner_vm runs remote_exec via timeout+bash-c, so callers must
++# export every variable the SSH helper closures read. Pin the export
++# lines as a regression check — dropping them silently breaks drain.
++if grep -Fq 'export vm_name GCP_PROJECT GCP_ZONE GCP_USE_IAP' "${DELETE_GCP}"; then
++  pass "delete-gcp-vm.sh: exports closure variables before drain_runner_vm"
++else
++  fail "delete-gcp-vm.sh: missing 'export vm_name GCP_PROJECT GCP_ZONE GCP_USE_IAP' before drain_runner_vm"
++fi
++if grep -Fq 'export vm_name NAMESPACE VM_USER' "${DELETE_OCP}"; then
++  pass "delete-openshift-vm.sh: exports closure variables before drain_runner_vm"
++else
++  fail "delete-openshift-vm.sh: missing 'export vm_name NAMESPACE VM_USER' before drain_runner_vm"
++fi
++
++# Idle detection must confirm gitlab-runner.service is no longer active, not
++# just an empty podman ps — pin the is-active probe as a regression check.
++if grep -Fq 'systemctl is-active gitlab-runner.service' "${SCRIPT_DIR}/lib.sh"; then
++  pass "lib.sh: idle poll confirms gitlab-runner.service is no longer active"
++else
++  fail "lib.sh: idle poll missing gitlab-runner.service is-active probe"
++fi
++
++# The no-runner_user config edit must restore config.toml's pre-edit
++# owner/mode after `sudo sed -i` (which rewrites through a new root:root
++# inode) — pin the stat+chown+chmod restore as a regression check so a
++# drive-by deletion is caught even if the capture-mock test above is
++# refactored.
++if grep -Fq 'sudo chown "\$cfg_owner"' "${SCRIPT_DIR}/lib.sh" \
++  && grep -Fq 'sudo chmod "\$cfg_mode"' "${SCRIPT_DIR}/lib.sh"; then
++  pass "lib.sh: no-runner_user config edit restores owner/mode after sed -i"
++else
++  fail "lib.sh: no-runner_user config edit missing owner/mode restore"
++fi
++
++# gcp_drain_ssh's non-IAP branch must use a per-run known-hosts file (like
++# create-gcp-vm.sh's direct-IP path), not gcloud's default known-hosts file.
++if grep -Fq 'UserKnownHostsFile=${GCP_KNOWN_HOSTS}' "${DELETE_GCP}"; then
++  pass "delete-gcp-vm.sh: non-IAP drain SSH uses a per-run known-hosts file"
++else
++  fail "delete-gcp-vm.sh: non-IAP drain SSH missing per-run UserKnownHostsFile"
++fi
++
++# shutdown_timeout must be written to the global TOML table (line 1),
++# not appended or inserted before [[runners]] (wrong table scope).
++if grep -Fq "1i shutdown_timeout" "${SCRIPT_DIR}/lib.sh"; then
++  pass "lib.sh: shutdown_timeout inserted at line 1 (global table)"
++else
++  fail "lib.sh: shutdown_timeout not inserted at line 1 — may land in wrong TOML table"
++fi
++
++if grep -E 'timeout[[:space:]]+"\$\{cmd_timeout\}"[[:space:]]+"\$\{remote_exec\}"' "${SCRIPT_DIR}/lib.sh" >/dev/null; then
++  fail "lib.sh: timeout still wraps remote_exec directly (timeout cannot call shell functions)"
++else
++  pass "lib.sh: timeout wraps remote_exec via bash -c (shell functions inherit via export -f)"
++fi
+ if grep -E 'timeout[[:space:]]+[0-9]+[[:space:]]+gce_ssh' "${CREATE_GCP}"; then
+   fail "gcp: timeout still wraps gce_ssh (timeout cannot call shell functions)"
+ else
