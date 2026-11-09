@@ -1,0 +1,147 @@
+{
+  "status": "success",
+  "repo": "fullsend-ai/fullsend",
+  "pr_number": 7234,
+  "work_item": "#7231",
+  "verdict": "APPROVED_WITH_FINDINGS",
+  "confidence": "MEDIUM",
+  "coverage_signal": "static",
+  "escalate": false,
+  "requirements": {
+    "total": 7,
+    "covered": 4,
+    "partial": 3,
+    "uncovered": 0,
+    "items": [
+      {
+        "requirement_id": "REQ-1",
+        "statement": "Re-mint the push token after the agent exits and before the post-script runs, so a full-budget run's post-script authenticates with a live token.",
+        "source": "#7231:suggested-fix",
+        "status": "partial",
+        "tests": ["TestRemintAgentTokenForPostScript_PostScriptEnvUsesFreshToken"]
+      },
+      {
+        "requirement_id": "REQ-2",
+        "statement": "The post-script must push with the reminted token, not the token snapshotted into RunnerEnv at the start of the run.",
+        "source": "#7231:observed",
+        "status": "covered",
+        "tests": [
+          "TestRemintAgentTokenForPostScript_PostScriptEnvUsesFreshToken",
+          "TestRemintAgentTokenForPostScript_RunnerEnvMissingTokenKeys"
+        ]
+      },
+      {
+        "requirement_id": "REQ-3",
+        "statement": "The failure-comment / notification path must also authenticate with a live token, since it needs one precisely when the run has gone wrong.",
+        "source": "#7231:observed",
+        "status": "partial",
+        "tests": ["TestRemintAgentTokenForPostScript_ErrorIsNonFatal"]
+      },
+      {
+        "requirement_id": "REQ-4",
+        "statement": "A remint failure must be non-fatal: the post-script still runs with the existing token so a mint outage cannot discard a completed run.",
+        "source": "#7231:why-this-matters",
+        "status": "covered",
+        "tests": ["TestRemintAgentTokenForPostScript_ErrorIsNonFatal"]
+      },
+      {
+        "requirement_id": "REQ-5",
+        "statement": "GitLab runs and runs with no mint URL configured must skip the remint entirely and leave RunnerEnv untouched.",
+        "source": "pr-body:changes",
+        "status": "covered",
+        "tests": ["TestRemintAgentTokenForPostScript_SkipsMintOnGitLabOrEmptyMintURL"]
+      },
+      {
+        "requirement_id": "REQ-6",
+        "statement": "The remint must still run when the run's parent context is already cancelled at budget exhaustion.",
+        "source": "#7231:observed",
+        "status": "covered",
+        "tests": ["TestRemintAgentTokenForPostScript_SurvivesCancelledParentCtx"]
+      },
+      {
+        "requirement_id": "REQ-7",
+        "statement": "A remint truncated by its own deadline must be reported distinctly from a genuine mint rejection, and the bound must not cut the client's own retry schedule short.",
+        "source": "issue-body:suggested-fix (derived: MaxMintDuration contract)",
+        "status": "partial",
+        "tests": [
+          "TestRemintAgentTokenForPostScript_DeadlineExceededGetsDistinctWarning",
+          "TestMintToken_SurvivesTransientFailuresWithinMaxMintDuration"
+        ]
+      }
+    ]
+  },
+  "findings": {
+    "critical": 0,
+    "major": 3,
+    "minor": 3,
+    "actionable": 6,
+    "total": 6,
+    "omitted": 0,
+    "items": [
+      {
+        "finding_id": "QF-1",
+        "severity": "MAJOR",
+        "dimension": "test_level",
+        "requirement_ref": "REQ-1",
+        "description": "The fix's central claim - that the remint runs after sandbox teardown and before postCmd - is only tested by calling remintAgentTokenForPostScript directly. No test drives runAgent through the post-script defer, so the placement of the new defer and the new stopOpenAIRefreshers loop (which must stop refresher goroutines before the remint's os.Setenv) are unexercised. A helper that works in isolation is not evidence it is wired in at the right point, and that wiring is the bug #7231 describes.",
+        "remediation": "Add a runAgent-level test using a harness with a post_script, following the existing TestRunAgent_FallsBackToFULLSEND_MINT_URL pattern, asserting the mint stub is called twice and that the post-script process observes the second token.",
+        "evidence": "All seven new tests in internal/cli/run_test.go call remintAgentTokenForPostScript or syncRunnerEnvTokens directly; none construct a runAgent invocation.",
+        "file": "internal/cli/run_test.go",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-2",
+        "severity": "MAJOR",
+        "dimension": "requirement_coverage",
+        "requirement_ref": "REQ-3",
+        "description": "#7231 calls out the failure-comment path explicitly ('the failure notification uses the same dead token'), and its suggested fix says the remint also fixes it. No test asserts it. The ordering may not even hold: remintCleanup is deferred late in runAgent, so under LIFO it restores the process env before any notification defer registered earlier - and run.go's new comment references 'the completion-notification defer ... elsewhere in this file'. If that defer posts the failure comment, it runs after the reminted token has been restored away.",
+        "remediation": "Determine whether the failure comment is posted by post-code.sh (covered transitively by the post-script env) or by the Go completion-notification defer. If the latter, move the remint cleanup so it outlives that defer, and add a test asserting the notification path sees the reminted token.",
+        "evidence": "internal/cli/run.go: 'defer remintCleanup()' is registered inside the post-script block; the new doc comment references a completion-notification defer registered earlier in the same function.",
+        "file": "internal/cli/run.go",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-3",
+        "severity": "MAJOR",
+        "dimension": "coverage_gap",
+        "requirement_ref": "REQ-7",
+        "description": "retryableError.Unwrap is new production code with no test that executes it. The test that appears to cover it, TestRemintAgentTokenForPostScript_DeadlineExceededGetsDistinctWarning, stubs statusMintToken to return ctx.Err() unwrapped, so the errors.Is path through a retryableError wrapping an in-flight context.DeadlineExceeded - the exact case the new Unwrap exists for - never runs.",
+        "remediation": "Add a test in internal/mintclient/mintclient_test.go where an HTTP attempt hangs past a context deadline, asserting errors.Is(err, context.DeadlineExceeded) holds on MintToken's returned error.",
+        "evidence": "internal/mintclient/mintclient.go adds func (e *retryableError) Unwrap(); mintclient_test.go adds only TestMintToken_SurvivesTransientFailuresWithinMaxMintDuration, which never triggers a deadline.",
+        "file": "internal/mintclient/mintclient.go",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-4",
+        "severity": "MINOR",
+        "dimension": "scenario_quality",
+        "requirement_ref": "REQ-7",
+        "description": "TestMintToken_SurvivesTransientFailuresWithinMaxMintDuration sets retryBaseDelay to 10ms and then asserts elapsed < MaxMintDuration (120s). That assertion cannot fail, so it does not defend the invariant its own docstring claims - that MaxMintDuration is not shorter than the client's real ~18s backoff schedule. Lowering MaxMintDuration to 5s would keep this test green while reintroducing the truncated-retry failure the const doc warns about.",
+        "remediation": "Assert on the constant directly (e.g. MaxMintDuration >= 18*time.Second, or compute the schedule sum from retryBaseDelay and the documented attempt counts) instead of relying on a wall-clock elapsed comparison against a shortened backoff.",
+        "file": "internal/mintclient/mintclient_test.go",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-5",
+        "severity": "MINOR",
+        "dimension": "scenario_quality",
+        "requirement_ref": "REQ-2",
+        "description": "syncRunnerEnvTokens iterates roleTokenVars[resolveRole(h.Role)], but every new test uses Role: 'coder'. The triage (TRIAGE_TOKEN) and review (REVIEW_TOKEN) role paths are never exercised, so a regression in the role-to-token-var mapping would not be caught by this PR's tests.",
+        "remediation": "Make the syncRunnerEnvTokens test table-driven over the roles in roleTokenVars, asserting each role's token var is refreshed from process env.",
+        "file": "internal/cli/run_test.go",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-6",
+        "severity": "MINOR",
+        "dimension": "scenario_quality",
+        "requirement_ref": "REQ-2",
+        "description": "In syncRunnerEnvTokens the os.LookupEnv not-found branch (key present in RunnerEnv, absent from the process env) has no test. TestRemintAgentTokenForPostScript_RunnerEnvMissingTokenKeys covers only the mirror case, where the key is absent from RunnerEnv.",
+        "remediation": "Add a case asserting a RunnerEnv token entry is left untouched when the corresponding process env var is unset (os.Unsetenv before the call).",
+        "file": "internal/cli/run_test.go",
+        "actionable": true
+      }
+    ]
+  },
+  "report": "qf_review.md"
+}

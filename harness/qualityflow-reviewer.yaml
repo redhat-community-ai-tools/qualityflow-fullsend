@@ -1,0 +1,83 @@
+# harness/qualityflow-reviewer.yaml — Read-only QE review of a PR's tests.
+#
+# Answers one question on an open PR: does this change test what its work item
+# asked for? Emits findings as a sticky PR comment. Writes no tests, pushes
+# nothing, submits no formal review — so it is safe to run automatically and
+# safe on fork PRs.
+#
+# This is the cheap, automatic front half of QualityFlow. The full generation
+# pipeline (harness/qualityflow.yaml) stays behind /fs-plan-tests; this agent
+# recommends it when the gap is big enough to be worth 120 minutes.
+
+# CEL trigger (ADR 0061): every PR that opens or leaves draft, plus an
+# explicit re-run command. Deliberately NOT on "synchronized" — that would
+# re-review on every push; add it if your team wants per-push feedback.
+trigger: |
+  (
+    event.entity.kind == "change_proposal"
+      && (event.transition.kind == "opened" || event.transition.kind == "marked_ready")
+  ) || (
+    event.transition.kind == "comment_added"
+      && event.transition.comment.command == "/fs-qe-review"
+      && has(event.state.change_proposal)
+  )
+
+# Lives outside qualityflow/ (the vendored copy) so scripts/sync-qualityflow.sh does not delete it.
+agent: agents/qualityflow-reviewer.md
+description: "QualityFlow QE review: does this PR test what its work item asked for?"
+role: review
+slug: qualityflow-reviewer
+model: opus
+image: ghcr.io/fullsend-ai/fullsend-code@sha256:a2154b2a94265e1e54b2dfaab6e2ec2659924b134cf62fdee09ddff3c4521d83  # pinned 2026-09-16 (was :latest); bump deliberately
+policy: policies/qf-full.yaml
+agent_input: qualityflow/config
+
+# Read-only: the sandbox gets the PR head but cannot write it back.
+readonly_repo: true
+
+host_files:
+  - src: env/gcp-vertex.env
+    dest: /sandbox/workspace/.env.d/gcp-vertex.env
+    expand: true
+  - src: ${GOOGLE_APPLICATION_CREDENTIALS}
+    dest: /tmp/.gcp-credentials.json
+  - src: ${GCP_OIDC_TOKEN_FILE}
+    dest: /sandbox/workspace/.gcp-oidc-token
+    optional: true
+  - src: env/qf-credentials.env
+    dest: /sandbox/workspace/.env.d/qf-credentials.env
+    expand: true
+
+# No lsp-tracer and no generator skills: this agent reads and judges, it does
+# not build. Tier-mode projects can append qualityflow/skills/tier-classifier.
+skills:
+  - qualityflow/skills/project-resolver
+  - qualityflow/skills/jira-parser
+  - qualityflow/skills/link-resolver
+  - qualityflow/skills/pr-analyzer
+  - qualityflow/skills/requirement-mapper
+  - qualityflow/skills/review-rules-extractor
+  - qualityflow/skills/test-strategy-resolver
+  - qualityflow/skills/output-validator
+
+validation_loop:
+  script: scripts/validate-output-schema.sh
+  max_iterations: 2
+
+post_script: scripts/post-qf-review.sh
+
+runner_env:
+  # Only host-provided vars may use ${...}; fullsend's env validator rejects
+  # any unset or empty expansion. The generic harness-run job provides
+  # GITHUB_ISSUE_URL, ISSUE_NUMBER, and REPO_FULL_NAME
+  # (.github/workflows/reusable-dispatch.yml).
+  GITHUB_ISSUE_URL: "${GITHUB_ISSUE_URL}"
+  REPO_FULL_NAME: "${REPO_FULL_NAME}"
+  PR_NUMBER: "${ISSUE_NUMBER}"
+  JIRA_TICKET: ""
+  ISSUE_SOURCE: "github"
+  FULLSEND_OUTPUT_SCHEMA: ${FULLSEND_DIR}/schemas/qf-review-result.schema.json
+
+# Read-and-judge on one PR. If this is timing out, the agent is doing
+# generation work it should not be doing.
+timeout_minutes: 20

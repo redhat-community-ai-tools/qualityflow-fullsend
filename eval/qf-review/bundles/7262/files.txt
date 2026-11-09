@@ -1,0 +1,5 @@
+hack/gitlab-runner-vm/README.md	+31/-7
+hack/gitlab-runner-vm/delete-gcp-vm.sh	+175/-51
+hack/gitlab-runner-vm/delete-openshift-vm.sh	+147/-53
+hack/gitlab-runner-vm/lib.sh	+226/-1
+hack/gitlab-runner-vm/lib_test.sh	+331/-0

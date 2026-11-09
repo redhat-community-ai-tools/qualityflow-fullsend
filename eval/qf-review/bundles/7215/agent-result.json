@@ -1,0 +1,100 @@
+{
+  "status": "success",
+  "repo": "fullsend-ai/fullsend",
+  "pr_number": 7215,
+  "work_item": "#7140",
+  "verdict": "APPROVED_WITH_FINDINGS",
+  "confidence": "MEDIUM",
+  "coverage_signal": "static",
+  "escalate": false,
+  "requirements": {
+    "total": 3,
+    "covered": 2,
+    "partial": 1,
+    "uncovered": 0,
+    "items": [
+      {
+        "requirement_id": "R1",
+        "statement": "A harness whose role contains a hyphen (ci-check) gets through the Setup agent environment step instead of failing with 'not a valid identifier'.",
+        "source": "issue-body:what-should-happen",
+        "status": "covered",
+        "tests": ["internal/scaffold/workflow_call_alignment_test.go:TestHarnessRunMapsHyphensInRoleIdentifiers"]
+      },
+      {
+        "requirement_id": "R2",
+        "statement": "Role-prefixed identifiers map the role with role.upper().replace(\"-\", \"_\") through one shared helper.",
+        "source": "issue-body:what-should-happen",
+        "status": "covered",
+        "tests": ["internal/mintcore/patterns_test.go:TestRoleIdentifier"]
+      },
+      {
+        "requirement_id": "R3",
+        "statement": "Every downstream consumer of role-prefixed identifiers uses the same mapping to look them up.",
+        "source": "issue-body:what-should-happen+context",
+        "status": "partial",
+        "tests": [
+          "internal/cli/admin_test.go:TestRoleAppPrivateKeySecret",
+          "internal/layers/secrets_test.go:TestSecretAndVariableNames_HyphenatedRole",
+          "internal/mintcore/foreign_test.go:TestForeignVariableName",
+          "internal/cli/foreign_test.go:TestForeignAllowCmd_HyphenatedRole",
+          "internal/dispatch/cf/provisioner_test.go:TestPemSecretName",
+          "internal/cli/github_test.go:TestRunGitHubStatus_ForeignVariableOmitsParsedRole"
+        ]
+      }
+    ]
+  },
+  "findings": {
+    "critical": 0,
+    "major": 1,
+    "minor": 3,
+    "actionable": 3,
+    "total": 4,
+    "items": [
+      {
+        "finding_id": "QF-1",
+        "severity": "MAJOR",
+        "dimension": "requirement_coverage",
+        "requirement_ref": "#7140:R3",
+        "description": "setup-agent-env.sh is the one consumer named in the issue Context section with no test. It looks up role-prefixed repo variables (<ROLE>_FULLSEND_MODEL) off AGENT_PREFIX, and this PR changes only its header comment (+3/-1, no code). No test asserts that a CI_CHECK_FULLSEND_MODEL repo variable is resolved for role ci-check; the fix is inherited transitively from the workflow's AGENT_PREFIX and is untested at that boundary.",
+        "remediation": "Add a test that runs setup-agent-env.sh with AGENT_PREFIX=CI_CHECK_ and a FULLSEND_REPO_VARS map containing CI_CHECK_FULLSEND_MODEL, asserting the role-prefixed override is exported and wins over the plain FULLSEND_MODEL.",
+        "evidence": "diff: internal/scaffold/fullsend-repo/.github/scripts/setup-agent-env.sh changes comment lines only; no test file in the PR references setup-agent-env.sh.",
+        "file": "internal/scaffold/fullsend-repo/.github/scripts/setup-agent-env.sh",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-2",
+        "severity": "MINOR",
+        "dimension": "coverage_gap",
+        "requirement_ref": "#7140:R2",
+        "description": "The embedded mint copy internal/dispatch/gcf/mintsrc/mintcore/patterns.go.embed gains RoleIdentifier (+11 lines) and foreign.go.embed starts calling it, but no test in this PR touches the .embed copies; TestRoleIdentifier was added only for internal/mintcore. Static reachability only: the added embed lines are not executed by anything in the diff.",
+        "remediation": "Confirm the existing embed/source drift check enumerates patterns.go.embed; if it does not, extend it so the GCF copy cannot diverge from internal/mintcore/patterns.go.",
+        "evidence": "diff adds identical RoleIdentifier bodies to internal/mintcore/patterns.go and internal/dispatch/gcf/mintsrc/mintcore/patterns.go.embed; only internal/mintcore/patterns_test.go is added.",
+        "file": "internal/dispatch/gcf/mintsrc/mintcore/patterns.go.embed",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-3",
+        "severity": "MINOR",
+        "dimension": "rule_compliance",
+        "requirement_ref": "#7140:R3",
+        "description": "parseForeignVariableName has more than one call site, but only runGitHubStatus was corrected to stop printing the lossily reconstructed role (CI_CHECK parses back to ci_check, never ci-check). internal/cli/foreign.go is touched in this PR for help text only, so any role rendering in its list/deny output would still show a role the user never typed. Not verifiable from the diff alone.",
+        "remediation": "Grep every parseForeignVariableName caller and apply the same name-only rendering; mirror the NotContains(\"(ci-check)\") assertion from TestRunGitHubStatus_ForeignVariableOmitsParsedRole in the foreign-list test.",
+        "evidence": "internal/cli/github.go drops the parsed role from the printed line; internal/cli/foreign.go's diff is limited to the cobra Long string.",
+        "file": "internal/cli/foreign.go",
+        "actionable": true
+      },
+      {
+        "finding_id": "QF-4",
+        "severity": "MINOR",
+        "dimension": "scenario_quality",
+        "requirement_ref": "#7140:R2",
+        "description": "The identifier collision this mapping introduces (ci-check and ci_check both map to CI_CHECK, so they share FULLSEND_CI_CHECK_APP_PRIVATE_KEY and the FOREIGN allow-list variable) is documented in standalone-mint.md and pinned at the helper level, but nothing detects or rejects two colliding roles at registration: one role silently overwrites the other's credential. Out of scope for #7140, raised because this PR is what creates the collision.",
+        "remediation": "Decide whether role registration / ValidateRoleName should reject a role whose RoleIdentifier already exists, then add a test for that rejection. Needs a product decision before a code agent can act.",
+        "evidence": "internal/mintcore/patterns_test.go pins {\"my-role\",\"MY_ROLE\"} and {\"my_role\",\"MY_ROLE\"}; no test or code guards the resulting credential-name collision.",
+        "file": "internal/mintcore/patterns.go",
+        "actionable": false
+      }
+    ]
+  },
+  "report": "qf_review.md"
+}
